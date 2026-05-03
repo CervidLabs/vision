@@ -8,42 +8,60 @@ import { clampU8, VisionFrame } from '../core/VisionFrame.js';
  * @param kw      Kernel width  (must be odd)
  * @param kh      Kernel height (must be odd)
  */
-export function convolve(frame: VisionFrame, kernel: number[], kw: number, kh: number): VisionFrame {
+export function convolve(
+  frame: VisionFrame,
+  kernel: number[],
+  kw: number,
+  kh: number
+): VisionFrame {
   if (kw % 2 === 0 || kh % 2 === 0) {
-    throw new Error('Kernel dimensions must be odd');
+    throw new Error("Kernel dimensions must be odd");
   }
+
   if (kernel.length !== kw * kh) {
-    throw new Error('Kernel length must equal kw * kh');
+    throw new Error("Kernel length must equal kw * kh");
   }
+
   if (frame.channels !== 1 && frame.channels !== 3) {
-    throw new Error('convolve supports 1 or 3-channel frames only');
+    throw new Error("convolve supports 1 or 3-channel frames only");
   }
 
   const { width, height, channels } = frame;
   const out = new VisionFrame(width, height, channels);
   const src = frame.data;
   const dst = out.data;
-  for (let y = 1; y < height - 1; y++) {
-    for (let x = 1; x < width - 1; x++) {
-      const i = y * width + x;
 
-      const tl = src[i - width - 1];
-      const tc = src[i - width];
-      const tr = src[i - width + 1];
+  const rx = (kw - 1) >> 1;
+  const ry = (kh - 1) >> 1;
 
-      const ml = src[i - 1];
-      const mr = src[i + 1];
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const dstBase = (y * width + x) * channels;
 
-      const bl = src[i + width - 1];
-      const bc = src[i + width];
-      const br = src[i + width + 1];
+      for (let c = 0; c < channels; c++) {
+        let acc = 0;
 
-      const gx = -tl + tr - 2 * ml + 2 * mr - bl + br;
-      const gy = -tl - 2 * tc - tr + bl + 2 * bc + br;
+        for (let ky = 0; ky < kh; ky++) {
+          let sy = y + ky - ry;
+          if (sy < 0) sy = 0;
+          else if (sy >= height) sy = height - 1;
 
-      dst[i] = clampU8(Math.abs(gx) + Math.abs(gy));
+          const srcRow = sy * width * channels;
+
+          for (let kx = 0; kx < kw; kx++) {
+            let sx = x + kx - rx;
+            if (sx < 0) sx = 0;
+            else if (sx >= width) sx = width - 1;
+
+            acc += src[srcRow + sx * channels + c] * kernel[ky * kw + kx];
+          }
+        }
+
+        dst[dstBase + c] = clampU8(acc);
+      }
     }
   }
+
   return out;
 }
 function gaussianBlurGrayR1(frame: VisionFrame, sigma?: number): VisionFrame {

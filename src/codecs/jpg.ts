@@ -134,20 +134,13 @@ function fdct8x8(src: Uint8Array, srcOff: number, srcStride: number, out: Float6
 // bitwise extraction via >>> works correctly even when the high bit is set.
 
 class BitReader {
-  private acc = 0; // unsigned 32-bit accumulator (up to ~24 bits valid)
-  private avail = 0; // valid bits in acc
+  private acc = 0;   // unsigned 32-bit accumulator (up to ~24 bits valid)
+  private avail = 0;   // valid bits in acc
   private _rst = false;
 
-  constructor(
-    private readonly buf: Uint8Array,
-    public pos: number,
-  ) { }
+  constructor(private readonly buf: Uint8Array, public pos: number) { }
 
-  get restartSeen(): boolean {
-    const v = this._rst;
-    this._rst = false;
-    return v;
-  }
+  get restartSeen(): boolean { const v = this._rst; this._rst = false; return v; }
 
   /** Refill acc until avail ≥ 16 (or until a restart marker is consumed). */
   private fill(): void {
@@ -161,13 +154,12 @@ class BitReader {
       if (byte === 0xff) {
         const nxt = this.buf[this.pos];
         if (nxt === 0x00) {
-          this.pos++; // byte stuffing: real 0xff data
+          this.pos++;                  // byte stuffing: real 0xff data
         } else if (nxt >= 0xd0 && nxt <= 0xd7) {
-          this.pos++; // restart marker
+          this.pos++;                  // restart marker
           this._rst = true;
-          this.acc = 0;
-          this.avail = 0;
-          continue; // keep filling from post-RST bytes
+          this.acc = 0; this.avail = 0;
+          continue;  // keep filling from post-RST bytes
         }
       }
       this.acc = ((this.acc << 8) | byte) >>> 0;
@@ -177,25 +169,17 @@ class BitReader {
 
   /** Peek at the top `n` bits without consuming them. n must be ≤ 16. */
   peek(n: number): number {
-    if (this.avail < n) {
-      this.fill();
-    }
+    if (this.avail < n) this.fill();
     return (this.acc >>> (this.avail - n)) & ((1 << n) - 1);
   }
 
   /** Consume `n` bits. Must be preceded by a peek/read that ensured avail ≥ n. */
-  skip(n: number): void {
-    this.avail -= n;
-  }
+  skip(n: number): void { this.avail -= n; }
 
   /** Read and consume `n` bits. n must be ≤ 16. */
   read(n: number): number {
-    if (n === 0) {
-      return 0;
-    }
-    if (this.avail < n) {
-      this.fill();
-    }
+    if (n === 0) return 0;
+    if (this.avail < n) this.fill();
     this.avail -= n;
     return (this.acc >>> this.avail) & ((1 << n) - 1);
   }
@@ -227,8 +211,7 @@ class HuffDec {
 
   constructor(lengths: Uint8Array, values: Uint8Array) {
     this.values = new Uint8Array(values);
-    let code = 0,
-      vi = 0;
+    let code = 0, vi = 0;
 
     for (let b = 1; b <= 16; b++) {
       const cnt = lengths[b - 1];
@@ -244,14 +227,11 @@ class HuffDec {
           for (let j = 0; j < cnt; j++) {
             const entry = (values[vi + j] << 4) | b;
             const base = (code + j) << (LUT_BITS - b);
-            for (let f = 0; f < fill; f++) {
-              this.lut[base + f] = entry;
-            }
+            for (let f = 0; f < fill; f++) this.lut[base + f] = entry;
           }
         }
 
-        vi += cnt;
-        code += cnt;
+        vi += cnt; code += cnt;
       }
       code <<= 1;
     }
@@ -263,8 +243,8 @@ class HuffDec {
     const entry = this.lut[peek];
 
     if (entry !== 0) {
-      r.skip(entry & 0xf); // consume only the actual code length
-      return entry >> 4; // symbol
+      r.skip(entry & 0xf);   // consume only the actual code length
+      return entry >> 4;     // symbol
     }
 
     // Slow path: code is longer than LUT_BITS — consume the peeked bits
@@ -273,9 +253,8 @@ class HuffDec {
     let code = peek;
     for (let b = LUT_BITS + 1; b <= 16; b++) {
       code = (code << 1) | r.read(1);
-      if (code >= this.minCode[b] && code <= this.maxCode[b]) {
+      if (code >= this.minCode[b] && code <= this.maxCode[b])
         return this.values[code + this.valOff[b]];
-      }
     }
     throw new Error('JPEG: bad Huffman code');
   }
@@ -319,6 +298,7 @@ interface JPEGFile {
   height: number;
   comps: Comp[];
   qtables: (Uint8Array | undefined)[];
+  restartInterval: number;  // 0 = no DRI / restart markers not used
   scans: ScanInfo[];
   buf: Uint8Array;
 }
@@ -332,7 +312,8 @@ function parseFile(buf: Uint8Array): JPEGFile {
 
   let sofType = -1,
     width = 0,
-    height = 0;
+    height = 0,
+    restartInterval = 0;
   const comps: Comp[] = [];
   const qtables: (Uint8Array | undefined)[] = new Array(4);
   const dcHuff: (HuffDec | undefined)[] = new Array(4);
@@ -384,10 +365,7 @@ function parseFile(buf: Uint8Array): JPEGFile {
       scans.push({
         nComps,
         scanComps,
-        Ss,
-        Se,
-        Ah,
-        Al,
+        Ss, Se, Ah, Al,
         dcHuff: [...dcHuff],
         acHuff: [...acHuff],
         dcRawData: [...dcRawData],
@@ -425,6 +403,10 @@ function parseFile(buf: Uint8Array): JPEGFile {
           }
           qtables[id] = qt;
         }
+        break;
+      }
+      case 0xdd: {  // DRI — Define Restart Interval
+        restartInterval = u16(buf, pos + 2);
         break;
       }
       case 0xc0:
@@ -482,7 +464,7 @@ function parseFile(buf: Uint8Array): JPEGFile {
   if (sofType < 0 || !width || !height || !comps.length) {
     throw new Error('JPEG: missing SOF / frame header');
   }
-  return { sofType, width, height, comps, qtables, scans, buf };
+  return { sofType, width, height, comps, qtables, scans, buf, restartInterval };
 }
 
 // ── Plane → VisionFrame ───────────────────────────────────────────────────────
@@ -539,9 +521,9 @@ function planesToFrame(planes: Uint8Array[], pw: number[], comps: Comp[], hMax: 
       const cr = Crp[crOff + crXMap[x]] - 128;
 
       // Integer BT.601 in Q8 — avoids float multiply per pixel
-      const r = yy + ((359 * cr) >> 8);
-      const g = yy - ((88 * cb + 183 * cr) >> 8);
-      const b = yy + ((454 * cb) >> 8);
+      const r = (yy + ((359 * cr) >> 8));
+      const g = (yy - ((88 * cb + 183 * cr) >> 8));
+      const b = (yy + ((454 * cb) >> 8));
 
       dst[out++] = r < 0 ? 0 : r > 255 ? 255 : r;
       dst[out++] = g < 0 ? 0 : g > 255 ? 255 : g;
@@ -553,7 +535,7 @@ function planesToFrame(planes: Uint8Array[], pw: number[], comps: Comp[], hMax: 
 }
 // ── Baseline decoder (SOF0 / SOF1) ───────────────────────────────────────────
 
-function decodeBaseline(f: JPEGFile): VisionFrame {
+async function decodeBaseline(f: JPEGFile): Promise<VisionFrame> {
   const { width, height, comps, qtables, scans, buf } = f;
   if (!scans.length) {
     throw new Error('JPEG: no scan');
@@ -616,8 +598,40 @@ function decodeBaseline(f: JPEGFile): VisionFrame {
       }
     }
   }
+  const _tHuff = performance.now();
 
+  // ── IDCT: parallel if image is large enough ───────────────────────────────
+  const nbX = comps.map((c) => mcuCols * c.hf);
+  const nbY = comps.map((c) => mcuRows * c.vf);
+  const totalBlk = nbX.reduce((s, x, i) => s + x * nbY[i], 0);
+
+  if (totalBlk >= JPEG_IDCT_WORKER_THRESHOLD_BLOCKS) {
+    // Re-allocate planes as SAB so workers can write into them
+    const coeffSABs = comps.map((_, ci) => {
+      const len = nbX[ci] * nbY[ci] * 64;
+      const sab = new SharedArrayBuffer(len * Int16Array.BYTES_PER_ELEMENT);
+      const dst = new Int16Array(sab);
+
+      // Convert the dequantised Float64 plane we filled above back into
+      // quantised Int16 levels for the worker (worker does coeff * qt[k])
+      const qt = qtables[comps[ci].qtId]!;
+      // planes[ci] already contains rendered pixels from inline idct — skip
+      // Instead we need to re-decode coefficients. Fall through to sync for now.
+      return null;
+    });
+
+    // Not all paths support retrofitting to workers here; fall through to sync.
+    // (Full two-pass refactor is in decodeProgresssive — baseline stays 1-pass)
+  }
+
+  const _tIdct = performance.now();
   const result = planesToFrame(planes, planeW, comps, hMax, vMax, width, height);
+  const _tConv = performance.now();
+
+  process.stderr.write(
+    `[baseline] huffman+idct=${(_tHuff - _t0Baseline).toFixed(0)}ms ` +
+    `(inline 1-pass) convert=${(_tConv - _tIdct).toFixed(0)}ms\n`
+  );
   return result;
 }
 
@@ -635,6 +649,42 @@ function decodeBaseline(f: JPEGFile): VisionFrame {
 //   AC first  (Ss>0, Ah=0)       — like baseline AC with EOB runs, values << Al
 //   AC refine (Ss>0, Ah>0)       — refine existing nonzeros + place new ones
 
+// ── Restart-interval finder ──────────────────────────────────────────────────
+// Scans raw JPEG bytes to find RST marker positions, enabling intra-scan
+// parallelism: each restart interval is independent (eobRun=0, dcPrev=0).
+
+interface RestartInterval { byteOffset: number; mcuStart: number; }
+
+function findRestartIntervals(
+  buf: Uint8Array,
+  dataStart: number,
+  restartInterval: number,
+  totalMCUs: number,
+): RestartInterval[] {
+  if (restartInterval === 0) return [{ byteOffset: dataStart, mcuStart: 0 }];
+
+  const intervals: RestartInterval[] = [{ byteOffset: dataStart, mcuStart: 0 }];
+  let pos = dataStart;
+  let rstIdx = 0;
+
+  while (pos < buf.length - 1) {
+    if (buf[pos] === 0xff) {
+      const nxt = buf[pos + 1];
+      if (nxt === 0x00) { pos += 2; continue; }           // stuffed byte
+      if (nxt >= 0xd0 && nxt <= 0xd7) {                   // RST marker
+        pos += 2;
+        rstIdx++;
+        const mcuStart = rstIdx * restartInterval;
+        if (mcuStart < totalMCUs) intervals.push({ byteOffset: pos, mcuStart });
+        continue;
+      }
+      break; // non-RST marker = end of scan data
+    }
+    pos++;
+  }
+  return intervals;
+}
+
 // ── Scan dependency analysis ─────────────────────────────────────────────────
 //
 // Progressive JPEG scans that touch the same (component, spectral range) must
@@ -646,11 +696,9 @@ function decodeBaseline(f: JPEGFile): VisionFrame {
 // within a wave is independent of every other scan in the same wave.
 
 function scanConflicts(a: ScanInfo, b: ScanInfo): boolean {
-  const aComps = new Set(a.scanComps.map((s) => s.ci));
+  const aComps = new Set(a.scanComps.map(s => s.ci));
   for (const { ci } of b.scanComps) {
-    if (aComps.has(ci) && a.Ss <= b.Se && b.Ss <= a.Se) {
-      return true;
-    }
+    if (aComps.has(ci) && a.Ss <= b.Se && b.Ss <= a.Se) return true;
   }
   return false;
 }
@@ -662,14 +710,10 @@ function buildScanWaves(scans: ScanInfo[]): ScanInfo[][] {
     // This preserves file order within each (component, spectral) chain.
     let lastConflict = -1;
     for (let i = 0; i < waves.length; i++) {
-      if (waves[i].some((s) => scanConflicts(s, scan))) {
-        lastConflict = i;
-      }
+      if (waves[i].some(s => scanConflicts(s, scan))) lastConflict = i;
     }
     const target = lastConflict + 1;
-    if (!waves[target]) {
-      waves[target] = [];
-    }
+    if (!waves[target]) waves[target] = [];
     waves[target].push(scan);
   }
   return waves;
@@ -703,53 +747,81 @@ async function decodeProgressive(f: JPEGFile): Promise<VisionFrame> {
     const length = nbX[ci] * nbY[ci] * 64;
     return new Int16Array(new SharedArrayBuffer(length * Int16Array.BYTES_PER_ELEMENT));
   });
-  const coeffSABs = coeffBufs.map((cb) => cb.buffer);
+  const coeffSABs = coeffBufs.map(cb => cb.buffer as SharedArrayBuffer);
 
   // Copy raw JPEG bytes to SAB once (shared read across all scan workers)
   const sharedBuf = new SharedArrayBuffer(buf.byteLength);
   new Uint8Array(sharedBuf).set(buf);
 
-  const compHf = comps.map((c) => c.hf);
-  const compVf = comps.map((c) => c.vf);
+  const compHf = comps.map(c => c.hf);
+  const compVf = comps.map(c => c.vf);
 
   // Group scans into dependency waves (independent scans in each wave run in parallel,
   // waves execute sequentially to preserve refinement pass ordering).
   const waves = buildScanWaves(scans);
-  const maxWave = Math.max(...waves.map((w) => w.length));
-  const scanPool = getJpegScanWorkerPool(maxWave);
+  const scanPool = getJpegScanWorkerPool();
 
-  const runScan = async (scan: ScanInfo) =>
-    scanPool
-      .run({
-        buf: sharedBuf,
-        dataStart: scan.dataStart,
-        nComps: scan.nComps,
-        scanComps: scan.scanComps,
-        Ss: scan.Ss,
-        Se: scan.Se,
-        Ah: scan.Ah,
-        Al: scan.Al,
-        mcuCols,
-        mcuRows,
-        nbX,
-        nbY,
-        compHf,
-        compVf,
-        dcRaw: scan.dcRawData,
-        acRaw: scan.acRawData,
-        coeffBufs: coeffSABs,
-      })
-      .catch((e) => {
-        process.stderr.write(`[progressive] SCAN WORKER ERROR wave=${waves.indexOf(wave)}: ${e}\n`);
-      });
+  // Each scan uses its OWN table snapshot — progressive JPEGs can redefine
+  // Huffman tables between scans with the same IDs (first-pass vs refinement).
+  const makeScanJob = (scan: ScanInfo, extra: Partial<Parameters<typeof scanPool.run>[0]> = {}) =>
+    scanPool.run({
+      buf: sharedBuf,
+      dataStart: scan.dataStart,
+      nComps: scan.nComps,
+      scanComps: scan.scanComps,
+      Ss: scan.Ss, Se: scan.Se, Ah: scan.Ah, Al: scan.Al,
+      mcuCols, mcuRows,
+      nbX, nbY, compHf, compVf,
+      dcRaw: scan.dcRawData,
+      acRaw: scan.acRawData,
+      coeffBufs: coeffSABs,
+      ...extra,
+    }).catch((e: unknown) => {
+      process.stderr.write(`[progressive] SCAN WORKER ERROR: ${e}\n`);
+    });
 
   const waveTimes: number[] = [];
   let wave: ScanInfo[] = [];
   for (wave of waves) {
     const wt0 = performance.now();
-    await Promise.all(wave.map(runScan));
+
+    // Single non-interleaved scan + JPEG has restart markers → split by interval
+    if (wave.length === 1 && wave[0].nComps === 1 && f.restartInterval > 0) {
+      const scan = wave[0];
+      const ci = scan.scanComps[0].ci;
+      const totalMCUs = nbX[ci] * nbY[ci];
+      const intervals = findRestartIntervals(buf, scan.dataStart, f.restartInterval, totalMCUs);
+
+      if (intervals.length > 1) {
+        process.stderr.write(`[progressive] wave2 RST split: ${intervals.length} intervals (DRI=${f.restartInterval})\n`);
+        await Promise.all(intervals.map((iv, idx) => {
+          const mcuCount = idx + 1 < intervals.length
+            ? intervals[idx + 1].mcuStart - iv.mcuStart
+            : totalMCUs - iv.mcuStart;
+          return makeScanJob(scan, { dataStart: iv.byteOffset, mcuOffset: iv.mcuStart, mcuCount });
+        }));
+        waveTimes.push(performance.now() - wt0);
+        continue;
+      }
+    }
+
+    // No restart markers or interleaved scan — log so we know
+    if (wave.length === 1) {
+      process.stderr.write(`[progressive] wave${waves.indexOf(wave)} serial (DRI=${f.restartInterval})\n`);
+    }
+
+    await Promise.all(wave.map(s => makeScanJob(s)));
     waveTimes.push(performance.now() - wt0);
   }
+
+  const _tp1 = performance.now();
+  const waveDetail = waves.map((w, i) =>
+    `${w.length}scan/${waveTimes[i].toFixed(0)}ms[${w.map(s => `Ss${s.Ss}Se${s.Se}Ah${s.Ah}ci${s.scanComps.map(c => c.ci).join('')}`).join(',')}]`
+  ).join(' → ');
+  process.stderr.write(
+    `[progressive] huffman-parse(parallel)=${(_tp1 - _tp0).toFixed(0)}ms\n` +
+    `  waves: ${waveDetail}\n`
+  );
 
   // ── Dequantise + IDCT ─────────────────────────────────────────────────────
   const planeW = nbX.map((n) => n * 8);
@@ -759,7 +831,9 @@ async function decodeProgressive(f: JPEGFile): Promise<VisionFrame> {
   const planes = comps.map((_, ci) => {
     const size = planeW[ci] * planeH[ci];
 
-    return useWorkers ? new Uint8Array(new SharedArrayBuffer(size)) : new Uint8Array(size);
+    return useWorkers
+      ? new Uint8Array(new SharedArrayBuffer(size))
+      : new Uint8Array(size);
   });
   if (!useWorkers) {
     runIdctSync(coeffBufs, planes, qtables, comps, nbX, nbY, planeW);
@@ -767,6 +841,9 @@ async function decodeProgressive(f: JPEGFile): Promise<VisionFrame> {
   }
 
   const pool = getJpegIdctWorkerPool();
+
+  // Log worker file resolution for debugging
+  process.stderr.write(`[progressive] dispatching IDCT jobs to pool (${nc} components)\n`);
 
   const jobs: Promise<void>[] = [];
 
@@ -780,24 +857,20 @@ async function decodeProgressive(f: JPEGFile): Promise<VisionFrame> {
     for (let j = 0; j < chunks; j++) {
       const rowStart = j * rowsPerJob;
       const rowEnd = Math.min(rows, rowStart + rowsPerJob);
-      if (rowStart >= rowEnd) {
-        continue;
-      }
+      if (rowStart >= rowEnd) continue;
 
       jobs.push(
-        pool
-          .run({
-            coeffBuffer: coeffBufs[ci].buffer,
-            planeBuffer: planes[ci].buffer as SharedArrayBuffer,
-            qt,
-            nbX: nbX[ci],
-            rowStart,
-            rowEnd,
-            planeWidth: planeW[ci],
-          })
-          .catch((e) => {
-            process.stderr.write(`[progressive] WORKER ERROR: ${e}\n`);
-          }),
+        pool.run({
+          coeffBuffer: coeffBufs[ci].buffer as SharedArrayBuffer,
+          planeBuffer: planes[ci].buffer as SharedArrayBuffer,
+          qt,
+          nbX: nbX[ci],
+          rowStart,
+          rowEnd,
+          planeWidth: planeW[ci],
+        }).catch((e: unknown) => {
+          process.stderr.write(`[progressive] WORKER ERROR: ${e}\n`);
+        })
       );
     }
   }
@@ -837,7 +910,7 @@ function runIdctSync(
   comps: Comp[],
   nbX: number[],
   nbY: number[],
-  planeW: number[],
+  planeW: number[]
 ): void {
   const dct = new Float64Array(64);
   const tmp = new Float64Array(64);
@@ -872,12 +945,25 @@ function runIdctSync(
 // ── Public read entry point ───────────────────────────────────────────────────
 
 export async function readJPEG(path: string): Promise<VisionFrame> {
+  const t0 = performance.now();
   const raw = await fs.readFile(path);
+  const t1 = performance.now();
 
   const buf = new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
   const jpeg = parseFile(buf);
+  const t2 = performance.now();
 
-  const result = jpeg.sofType <= 1 ? decodeBaseline(jpeg) : await decodeProgressive(jpeg);
+  const result = jpeg.sofType <= 1
+    ? await decodeBaseline(jpeg)
+    : await decodeProgressive(jpeg);
+  const t3 = performance.now();
+
+  // Internal breakdown written to stderr so it doesn't pollute stdout
+  process.stderr.write(
+    `[jpg] sof=${jpeg.sofType} ${jpeg.width}x${jpeg.height} ` +
+    `fileRead=${(t1 - t0).toFixed(0)}ms segParse=${(t2 - t1).toFixed(0)}ms ` +
+    `decode=${(t3 - t2).toFixed(0)}ms\n`
+  );
   return result;
 }
 
@@ -1231,11 +1317,23 @@ export async function writeJPEG(path: string, frame: VisionFrame, quality = 85):
       }
     }
     w.flush();
-    out.push(...w.out);
+    pushMany(out, w.out);
+
   }
 
   // EOI
   out.push(0xff, 0xd9);
 
   await fs.writeFile(path, Buffer.from(Uint8Array.from(out).buffer));
+}
+function pushMany(dst: number[], src: ArrayLike<number>): void {
+  const chunk = 8192;
+
+  for (let i = 0; i < src.length; i += chunk) {
+    const end = Math.min(src.length, i + chunk);
+
+    for (let j = i; j < end; j++) {
+      dst.push(src[j]);
+    }
+  }
 }
