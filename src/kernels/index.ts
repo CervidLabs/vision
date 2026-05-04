@@ -3,3 +3,8 @@ export * from './convolve.js';
 export * from './geometry.js';
 export * from './color.js';
 export * from './parallel.js';
+export * from './draw.js';
+export * from './morphology.js';
+export * from './components.js';
+export * from './masks.js';
+export * from './integral.js';

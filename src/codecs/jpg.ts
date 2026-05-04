@@ -10,17 +10,16 @@
  */
 
 import { promises as fs } from 'node:fs';
-import { performance } from 'node:perf_hooks';
-import { VisionFrame, clampU8 } from '../core/VisionFrame.js';
+import { VisionFrame } from '../core/VisionFrame.js';
 import { getJpegIdctWorkerPool } from './JpegIdctWorkerPool.js';
-import { getJpegScanWorkerPool, type RawHuffTable } from './JpegScanWorkerPool.js';
-import { cpus } from 'node:os';
-
-// Number of IDCT row-chunks dispatched per component to the worker pool.
-// Using 2× worker count keeps all workers busy even when chunk sizes differ.
-const IDCT_CHUNKS_PER_COMP = Math.max(4, (cpus().length - 1) * 2);
 // ── Zigzag scan order ─────────────────────────────────────────────────────────
-
+export interface JPEGReadOptions {
+  resize?: {
+    width?: number;
+    height?: number;
+    method?: 'nearest' | 'bilinear' | 'area';
+  };
+}
 const ZZ = new Uint8Array([
   0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43,
   36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
@@ -101,160 +100,110 @@ function idct8x8(coeff: Float64Array, tmp: Float64Array, out: Uint8Array, off: n
     out[off + stride * 7 + x] = v < 0 ? 0 : v > 255 ? 255 : v;
   }
 }
-function fdct8x8(src: Uint8Array, srcOff: number, srcStride: number, out: Float64Array): void {
-  const tmp = new Float64Array(64);
+// tmp is caller-provided Float64Array(64) — reused across all block calls to avoid GC.
+// Uses flat COS8[u*8+x] instead of COS[u][x] for better cache behaviour.
+function fdct8x8(src: Uint8Array, srcOff: number, srcStride: number, out: Float64Array, tmp: Float64Array): void {
   for (let y = 0; y < 8; y++) {
-    const b = y * srcStride + srcOff;
+    const b = y * srcStride + srcOff, tb = y * 8;
+    const s0 = src[b] - 128, s1 = src[b + 1] - 128, s2 = src[b + 2] - 128, s3 = src[b + 3] - 128;
+    const s4 = src[b + 4] - 128, s5 = src[b + 5] - 128, s6 = src[b + 6] - 128, s7 = src[b + 7] - 128;
     for (let u = 0; u < 8; u++) {
-      let s = 0;
-      for (let x = 0; x < 8; x++) {
-        s += (src[b + x] - 128) * COS[u][x];
-      }
-      tmp[y * 8 + u] = s * (u === 0 ? INV_SQRT2 : 1) * 0.5;
+      const ub = u * 8;
+      tmp[tb + u] = (s0 * COS8[ub] + s1 * COS8[ub + 1] + s2 * COS8[ub + 2] + s3 * COS8[ub + 3] +
+        s4 * COS8[ub + 4] + s5 * COS8[ub + 5] + s6 * COS8[ub + 6] + s7 * COS8[ub + 7])
+        * (u === 0 ? INV_SQRT2 : 1) * 0.5;
     }
   }
   for (let u = 0; u < 8; u++) {
+    const t0 = tmp[u], t1 = tmp[8 + u], t2 = tmp[16 + u], t3 = tmp[24 + u];
+    const t4 = tmp[32 + u], t5 = tmp[40 + u], t6 = tmp[48 + u], t7 = tmp[56 + u];
     for (let v = 0; v < 8; v++) {
-      let s = 0;
-      for (let y = 0; y < 8; y++) {
-        s += tmp[y * 8 + u] * COS[v][y];
-      }
-      out[v * 8 + u] = s * (v === 0 ? INV_SQRT2 : 1) * 0.5;
+      const vb = v * 8;
+      out[v * 8 + u] = (t0 * COS8[vb] + t1 * COS8[vb + 1] + t2 * COS8[vb + 2] + t3 * COS8[vb + 3] +
+        t4 * COS8[vb + 4] + t5 * COS8[vb + 5] + t6 * COS8[vb + 6] + t7 * COS8[vb + 7])
+        * (v === 0 ? INV_SQRT2 : 1) * 0.5;
     }
   }
 }
 
 // ── Bit reader ────────────────────────────────────────────────────────────────
 
-// ── BitReader — accumulator with peek/skip and bulk refill ───────────────────
-//
-// Maintains a ≤24-bit accumulator (acc) filled in 8-bit chunks on demand.
-// fill() guarantees ≥16 bits so peek(n≤16) and read(n≤16) never refill
-// mid-operation. The >>> 0 casts keep acc as an unsigned 32-bit integer so
-// bitwise extraction via >>> works correctly even when the high bit is set.
-
 class BitReader {
-  private acc = 0;   // unsigned 32-bit accumulator (up to ~24 bits valid)
-  private avail = 0;   // valid bits in acc
+  bits = 0;
+  bitsLeft = 0;
   private _rst = false;
 
-  constructor(private readonly buf: Uint8Array, public pos: number) { }
+  constructor(
+    private buf: Uint8Array,
+    public pos: number,
+  ) { }
 
-  get restartSeen(): boolean { const v = this._rst; this._rst = false; return v; }
+  get restartSeen(): boolean {
+    const v = this._rst;
+    this._rst = false;
+    return v;
+  }
 
-  /** Refill acc until avail ≥ 16 (or until a restart marker is consumed). */
-  private fill(): void {
-    while (this.avail < 16) {
+  read(n: number): number {
+    while (this.bitsLeft < n) {
       if (this.pos >= this.buf.length) {
-        this.acc = ((this.acc << 8) | 0xff) >>> 0;
-        this.avail += 8;
+        this.bits = (this.bits << 8) | 0xff;
+        this.bitsLeft += 8;
         continue;
       }
       const byte = this.buf[this.pos++];
       if (byte === 0xff) {
         const nxt = this.buf[this.pos];
         if (nxt === 0x00) {
-          this.pos++;                  // byte stuffing: real 0xff data
+          this.pos++;
         } else if (nxt >= 0xd0 && nxt <= 0xd7) {
-          this.pos++;                  // restart marker
+          this.pos++;
           this._rst = true;
-          this.acc = 0; this.avail = 0;
-          continue;  // keep filling from post-RST bytes
+          this.bits = 0;
+          this.bitsLeft = 0;
+          continue;
         }
       }
-      this.acc = ((this.acc << 8) | byte) >>> 0;
-      this.avail += 8;
+      this.bits = (this.bits << 8) | byte;
+      this.bitsLeft += 8;
     }
-  }
-
-  /** Peek at the top `n` bits without consuming them. n must be ≤ 16. */
-  peek(n: number): number {
-    if (this.avail < n) this.fill();
-    return (this.acc >>> (this.avail - n)) & ((1 << n) - 1);
-  }
-
-  /** Consume `n` bits. Must be preceded by a peek/read that ensured avail ≥ n. */
-  skip(n: number): void { this.avail -= n; }
-
-  /** Read and consume `n` bits. n must be ≤ 16. */
-  read(n: number): number {
-    if (n === 0) return 0;
-    if (this.avail < n) this.fill();
-    this.avail -= n;
-    return (this.acc >>> this.avail) & ((1 << n) - 1);
+    this.bitsLeft -= n;
+    return (this.bits >>> this.bitsLeft) & ((1 << n) - 1);
   }
 }
 
-// ── Huffman decode table with 9-bit LUT ──────────────────────────────────────
-//
-// A 512-entry lookup table covers all codes of length ≤ 9 bits in a single
-// array access + skip, avoiding the bit-by-bit loop for the common case.
-//
-// LUT entry layout (Uint16):
-//   bits [12:4]  symbol value  (0–255)
-//   bits [ 3:0]  code length   (1–9)
-//   entry = 0    → slow path (code is longer than LUT_BITS)
-//
-// Because code length is always ≥ 1, (sym << 4) | len is never 0 for any
-// valid code, so 0 unambiguously signals "not in LUT".
-
-const LUT_BITS = 9;
+// ── Huffman decode table ──────────────────────────────────────────────────────
 
 class HuffDec {
-  // Fast-path: 512-entry LUT for codes ≤ 9 bits
-  private readonly lut = new Uint16Array(1 << LUT_BITS);
-  // Slow-path: canonical table for codes > 9 bits
-  private readonly minCode = new Int32Array(17).fill(-1);
-  private readonly maxCode = new Int32Array(17).fill(-2);
-  private readonly valOff = new Int32Array(17);
-  private readonly values: Uint8Array;
+  private minCode = new Int32Array(17).fill(-1);
+  private maxCode = new Int32Array(17).fill(-2);
+  private valOff = new Int32Array(17);
+  private values: Uint8Array;
 
   constructor(lengths: Uint8Array, values: Uint8Array) {
     this.values = new Uint8Array(values);
-    let code = 0, vi = 0;
-
+    let code = 0,
+      vi = 0;
     for (let b = 1; b <= 16; b++) {
       const cnt = lengths[b - 1];
       if (cnt > 0) {
         this.minCode[b] = code;
         this.maxCode[b] = code + cnt - 1;
         this.valOff[b] = vi - code;
-
-        // Populate LUT for short codes: each code of length b maps to
-        // (1 << (LUT_BITS - b)) consecutive LUT entries (don't-care suffix).
-        if (b <= LUT_BITS) {
-          const fill = 1 << (LUT_BITS - b);
-          for (let j = 0; j < cnt; j++) {
-            const entry = (values[vi + j] << 4) | b;
-            const base = (code + j) << (LUT_BITS - b);
-            for (let f = 0; f < fill; f++) this.lut[base + f] = entry;
-          }
-        }
-
-        vi += cnt; code += cnt;
+        vi += cnt;
+        code += cnt;
       }
       code <<= 1;
     }
   }
 
   decode(r: BitReader): number {
-    // Fast path: one table lookup for codes ≤ LUT_BITS bits
-    const peek = r.peek(LUT_BITS);
-    const entry = this.lut[peek];
-
-    if (entry !== 0) {
-      r.skip(entry & 0xf);   // consume only the actual code length
-      return entry >> 4;     // symbol
-    }
-
-    // Slow path: code is longer than LUT_BITS — consume the peeked bits
-    // and read one more bit at a time (rare, <5% of symbols in practice).
-    r.skip(LUT_BITS);
-    let code = peek;
-    for (let b = LUT_BITS + 1; b <= 16; b++) {
+    let code = 0;
+    for (let b = 1; b <= 16; b++) {
       code = (code << 1) | r.read(1);
-      if (code >= this.minCode[b] && code <= this.maxCode[b])
+      if (code >= this.minCode[b] && code <= this.maxCode[b]) {
         return this.values[code + this.valOff[b]];
+      }
     }
     throw new Error('JPEG: bad Huffman code');
   }
@@ -286,9 +235,6 @@ interface ScanInfo {
   Al: number;
   dcHuff: (HuffDec | undefined)[];
   acHuff: (HuffDec | undefined)[];
-  // Raw table data for serialising to scan-parser workers
-  dcRawData: (RawHuffTable | null)[];
-  acRawData: (RawHuffTable | null)[];
   dataStart: number;
 }
 
@@ -298,7 +244,6 @@ interface JPEGFile {
   height: number;
   comps: Comp[];
   qtables: (Uint8Array | undefined)[];
-  restartInterval: number;  // 0 = no DRI / restart markers not used
   scans: ScanInfo[];
   buf: Uint8Array;
 }
@@ -312,14 +257,11 @@ function parseFile(buf: Uint8Array): JPEGFile {
 
   let sofType = -1,
     width = 0,
-    height = 0,
-    restartInterval = 0;
+    height = 0;
   const comps: Comp[] = [];
   const qtables: (Uint8Array | undefined)[] = new Array(4);
   const dcHuff: (HuffDec | undefined)[] = new Array(4);
   const acHuff: (HuffDec | undefined)[] = new Array(4);
-  const dcRawData: (RawHuffTable | null)[] = new Array(4).fill(null);
-  const acRawData: (RawHuffTable | null)[] = new Array(4).fill(null);
   const scans: ScanInfo[] = [];
 
   let pos = 2;
@@ -365,11 +307,12 @@ function parseFile(buf: Uint8Array): JPEGFile {
       scans.push({
         nComps,
         scanComps,
-        Ss, Se, Ah, Al,
+        Ss,
+        Se,
+        Ah,
+        Al,
         dcHuff: [...dcHuff],
         acHuff: [...acHuff],
-        dcRawData: [...dcRawData],
-        acRawData: [...acRawData],
         dataStart,
       });
 
@@ -405,10 +348,6 @@ function parseFile(buf: Uint8Array): JPEGFile {
         }
         break;
       }
-      case 0xdd: {  // DRI — Define Restart Interval
-        restartInterval = u16(buf, pos + 2);
-        break;
-      }
       case 0xc0:
       case 0xc1:
       case 0xc2: {
@@ -442,17 +381,11 @@ function parseFile(buf: Uint8Array): JPEGFile {
           const nVals = Array.from(lengths).reduce((s, v) => s + v, 0);
           const values = buf.subarray(p, p + nVals);
           p += nVals;
-          const rawTbl: RawHuffTable = {
-            lengths: Array.from(lengths),
-            values: Array.from(values),
-          };
           const tbl = new HuffDec(new Uint8Array(lengths), new Uint8Array(values));
           if (cls === 0) {
             dcHuff[id] = tbl;
-            dcRawData[id] = rawTbl;
           } else {
             acHuff[id] = tbl;
-            acRawData[id] = rawTbl;
           }
         }
         break;
@@ -464,29 +397,159 @@ function parseFile(buf: Uint8Array): JPEGFile {
   if (sofType < 0 || !width || !height || !comps.length) {
     throw new Error('JPEG: missing SOF / frame header');
   }
-  return { sofType, width, height, comps, qtables, scans, buf, restartInterval };
+  return { sofType, width, height, comps, qtables, scans, buf };
 }
 
 // ── Plane → VisionFrame ───────────────────────────────────────────────────────
 
-function planesToFrame(planes: Uint8Array[], pw: number[], comps: Comp[], hMax: number, vMax: number, W: number, H: number): VisionFrame {
-  const nc = comps.length;
-  const outCh = nc === 1 ? 1 : 3;
-  const frame = new VisionFrame(W, H, outCh);
+// ── Fast YCbCr → RGB conversion tables ───────────────────────────────────────
+// BT.601 integer approximation in Q8:
+// R = Y + 1.402 Cr
+// G = Y - 0.344136 Cb - 0.714136 Cr
+// B = Y + 1.772 Cb
+
+const CR_R = new Int16Array(256);
+const CB_B = new Int16Array(256);
+const CB_G = new Int16Array(256);
+const CR_G = new Int16Array(256);
+
+for (let i = 0; i < 256; i++) {
+  const v = i - 128;
+  CR_R[i] = (359 * v) >> 8;
+  CB_B[i] = (454 * v) >> 8;
+  CB_G[i] = (88 * v) >> 8;
+  CR_G[i] = (183 * v) >> 8;
+}
+
+// ── Plane → VisionFrame ───────────────────────────────────────────────────────
+
+function planesToFrameGray(planes: Uint8Array[], pw: number[], W: number, H: number): VisionFrame {
+  const frame = new VisionFrame(W, H, 1);
+  const dst = frame.data;
+  const Y = planes[0];
+  const stride = pw[0];
+
+  for (let y = 0; y < H; y++) {
+    const srcOff = y * stride;
+    const dstOff = y * W;
+    dst.set(Y.subarray(srcOff, srcOff + W), dstOff);
+  }
+
+  return frame;
+}
+
+function planesToFrame420(planes: Uint8Array[], pw: number[], W: number, H: number): VisionFrame {
+  const frame = new VisionFrame(W, H, 3);
   const dst = frame.data;
 
-  if (nc === 1) {
-    const Y = planes[0];
-    const stride = pw[0];
+  const Yp = planes[0];
+  const Cbp = planes[1];
+  const Crp = planes[2];
 
-    for (let y = 0; y < H; y++) {
-      const srcOff = y * stride;
-      const dstOff = y * W;
-      dst.set(Y.subarray(srcOff, srcOff + W), dstOff);
+  const yStride = pw[0];
+  const cStride = pw[1];
+
+  for (let y = 0; y < H; y++) {
+    const yOff = y * yStride;
+    const cOff = (y >> 1) * cStride;
+
+    let out = y * W * 3;
+    let x = 0;
+
+    for (; x < W - 1; x += 2) {
+      const ci = cOff + (x >> 1);
+      const cb = Cbp[ci];
+      const cr = Crp[ci];
+
+      const rAdd = CR_R[cr];
+      const gSub = CB_G[cb] + CR_G[cr];
+      const bAdd = CB_B[cb];
+
+      let yy = Yp[yOff + x];
+      let r = yy + rAdd;
+      let g = yy - gSub;
+      let b = yy + bAdd;
+
+      dst[out++] = r < 0 ? 0 : r > 255 ? 255 : r;
+      dst[out++] = g < 0 ? 0 : g > 255 ? 255 : g;
+      dst[out++] = b < 0 ? 0 : b > 255 ? 255 : b;
+
+      yy = Yp[yOff + x + 1];
+      r = yy + rAdd;
+      g = yy - gSub;
+      b = yy + bAdd;
+
+      dst[out++] = r < 0 ? 0 : r > 255 ? 255 : r;
+      dst[out++] = g < 0 ? 0 : g > 255 ? 255 : g;
+      dst[out++] = b < 0 ? 0 : b > 255 ? 255 : b;
     }
 
-    return frame;
+    if (x < W) {
+      const ci = cOff + (x >> 1);
+      const cb = Cbp[ci];
+      const cr = Crp[ci];
+      const yy = Yp[yOff + x];
+
+      const r = yy + CR_R[cr];
+      const g = yy - (CB_G[cb] + CR_G[cr]);
+      const b = yy + CB_B[cb];
+
+      dst[out++] = r < 0 ? 0 : r > 255 ? 255 : r;
+      dst[out++] = g < 0 ? 0 : g > 255 ? 255 : g;
+      dst[out++] = b < 0 ? 0 : b > 255 ? 255 : b;
+    }
   }
+
+  return frame;
+}
+
+function planesToFrame444(planes: Uint8Array[], pw: number[], W: number, H: number): VisionFrame {
+  const frame = new VisionFrame(W, H, 3);
+  const dst = frame.data;
+
+  const Yp = planes[0];
+  const Cbp = planes[1];
+  const Crp = planes[2];
+
+  const yStride = pw[0];
+  const cbStride = pw[1];
+  const crStride = pw[2];
+
+  for (let y = 0; y < H; y++) {
+    const yOff = y * yStride;
+    const cbOff = y * cbStride;
+    const crOff = y * crStride;
+    let out = y * W * 3;
+
+    for (let x = 0; x < W; x++) {
+      const yy = Yp[yOff + x];
+      const cb = Cbp[cbOff + x];
+      const cr = Crp[crOff + x];
+
+      const r = yy + CR_R[cr];
+      const g = yy - (CB_G[cb] + CR_G[cr]);
+      const b = yy + CB_B[cb];
+
+      dst[out++] = r < 0 ? 0 : r > 255 ? 255 : r;
+      dst[out++] = g < 0 ? 0 : g > 255 ? 255 : g;
+      dst[out++] = b < 0 ? 0 : b > 255 ? 255 : b;
+    }
+  }
+
+  return frame;
+}
+
+function planesToFrameGeneric(
+  planes: Uint8Array[],
+  pw: number[],
+  comps: Comp[],
+  hMax: number,
+  vMax: number,
+  W: number,
+  H: number,
+): VisionFrame {
+  const frame = new VisionFrame(W, H, 3);
+  const dst = frame.data;
 
   const Yp = planes[0];
   const Cbp = planes[1];
@@ -517,13 +580,12 @@ function planesToFrame(planes: Uint8Array[], pw: number[], comps: Comp[], hMax: 
 
     for (let x = 0; x < W; x++) {
       const yy = Yp[yOff + x];
-      const cb = Cbp[cbOff + cbXMap[x]] - 128;
-      const cr = Crp[crOff + crXMap[x]] - 128;
+      const cb = Cbp[cbOff + cbXMap[x]];
+      const cr = Crp[crOff + crXMap[x]];
 
-      // Integer BT.601 in Q8 — avoids float multiply per pixel
-      const r = (yy + ((359 * cr) >> 8));
-      const g = (yy - ((88 * cb + 183 * cr) >> 8));
-      const b = (yy + ((454 * cb) >> 8));
+      const r = yy + CR_R[cr];
+      const g = yy - (CB_G[cb] + CR_G[cr]);
+      const b = yy + CB_B[cb];
 
       dst[out++] = r < 0 ? 0 : r > 255 ? 255 : r;
       dst[out++] = g < 0 ? 0 : g > 255 ? 255 : g;
@@ -533,9 +595,51 @@ function planesToFrame(planes: Uint8Array[], pw: number[], comps: Comp[], hMax: 
 
   return frame;
 }
+
+function planesToFrame(planes: Uint8Array[], pw: number[], comps: Comp[], hMax: number, vMax: number, W: number, H: number): VisionFrame {
+  const nc = comps.length;
+
+  if (nc === 1) {
+    return planesToFrameGray(planes, pw, W, H);
+  }
+
+  if (nc !== 3) {
+    throw new Error(`JPEG: unsupported component count ${nc}`);
+  }
+
+  // Fast path: common JPEG 4:2:0
+  if (
+    hMax === 2 &&
+    vMax === 2 &&
+    comps[0].hf === 2 &&
+    comps[0].vf === 2 &&
+    comps[1].hf === 1 &&
+    comps[1].vf === 1 &&
+    comps[2].hf === 1 &&
+    comps[2].vf === 1
+  ) {
+    return planesToFrame420(planes, pw, W, H);
+  }
+
+  // Fast path: 4:4:4
+  if (
+    hMax === 1 &&
+    vMax === 1 &&
+    comps[0].hf === 1 &&
+    comps[0].vf === 1 &&
+    comps[1].hf === 1 &&
+    comps[1].vf === 1 &&
+    comps[2].hf === 1 &&
+    comps[2].vf === 1
+  ) {
+    return planesToFrame444(planes, pw, W, H);
+  }
+
+  return planesToFrameGeneric(planes, pw, comps, hMax, vMax, W, H);
+}
 // ── Baseline decoder (SOF0 / SOF1) ───────────────────────────────────────────
 
-async function decodeBaseline(f: JPEGFile): Promise<VisionFrame> {
+function decodeBaseline(f: JPEGFile): VisionFrame {
   const { width, height, comps, qtables, scans, buf } = f;
   if (!scans.length) {
     throw new Error('JPEG: no scan');
@@ -549,7 +653,6 @@ async function decodeBaseline(f: JPEGFile): Promise<VisionFrame> {
   const planeW = comps.map((c) => mcuCols * c.hf * 8);
   const planeH = comps.map((c) => mcuRows * c.vf * 8);
   const planes = comps.map((_, i) => new Uint8Array(planeW[i] * planeH[i]));
-  const _t0Baseline = performance.now();
   const reader = new BitReader(buf, scan.dataStart);
   const dcPrev = new Int32Array(nc);
   const coeff = new Float64Array(64);
@@ -598,44 +701,10 @@ async function decodeBaseline(f: JPEGFile): Promise<VisionFrame> {
       }
     }
   }
-  const _tHuff = performance.now();
-
-  // ── IDCT: parallel if image is large enough ───────────────────────────────
-  const nbX = comps.map((c) => mcuCols * c.hf);
-  const nbY = comps.map((c) => mcuRows * c.vf);
-  const totalBlk = nbX.reduce((s, x, i) => s + x * nbY[i], 0);
-
-  if (totalBlk >= JPEG_IDCT_WORKER_THRESHOLD_BLOCKS) {
-    // Re-allocate planes as SAB so workers can write into them
-    const coeffSABs = comps.map((_, ci) => {
-      const len = nbX[ci] * nbY[ci] * 64;
-      const sab = new SharedArrayBuffer(len * Int16Array.BYTES_PER_ELEMENT);
-      const dst = new Int16Array(sab);
-
-      // Convert the dequantised Float64 plane we filled above back into
-      // quantised Int16 levels for the worker (worker does coeff * qt[k])
-      const qt = qtables[comps[ci].qtId]!;
-      // planes[ci] already contains rendered pixels from inline idct — skip
-      // Instead we need to re-decode coefficients. Fall through to sync for now.
-      return null;
-    });
-
-    // Not all paths support retrofitting to workers here; fall through to sync.
-    // (Full two-pass refactor is in decodeProgresssive — baseline stays 1-pass)
-  }
-
-  const _tIdct = performance.now();
-  const result = planesToFrame(planes, planeW, comps, hMax, vMax, width, height);
-  const _tConv = performance.now();
-
-  process.stderr.write(
-    `[baseline] huffman+idct=${(_tHuff - _t0Baseline).toFixed(0)}ms ` +
-    `(inline 1-pass) convert=${(_tConv - _tIdct).toFixed(0)}ms\n`
-  );
-  return result;
+  return planesToFrame(planes, planeW, comps, hMax, vMax, width, height);
 }
 
-// ── Progressive decoder (SOF2)
+// ── Progressive decoder (SOF2) ────────────────────────────────────────────────
 //
 // Progressive JPEG stores DCT coefficients across multiple scans.
 // Each scan specifies:
@@ -648,76 +717,6 @@ async function decodeBaseline(f: JPEGFile): Promise<VisionFrame> {
 //   DC refine (Ss=0, Se=0, Ah>0) — read 1 refinement bit per block
 //   AC first  (Ss>0, Ah=0)       — like baseline AC with EOB runs, values << Al
 //   AC refine (Ss>0, Ah>0)       — refine existing nonzeros + place new ones
-
-// ── Restart-interval finder ──────────────────────────────────────────────────
-// Scans raw JPEG bytes to find RST marker positions, enabling intra-scan
-// parallelism: each restart interval is independent (eobRun=0, dcPrev=0).
-
-interface RestartInterval { byteOffset: number; mcuStart: number; }
-
-function findRestartIntervals(
-  buf: Uint8Array,
-  dataStart: number,
-  restartInterval: number,
-  totalMCUs: number,
-): RestartInterval[] {
-  if (restartInterval === 0) return [{ byteOffset: dataStart, mcuStart: 0 }];
-
-  const intervals: RestartInterval[] = [{ byteOffset: dataStart, mcuStart: 0 }];
-  let pos = dataStart;
-  let rstIdx = 0;
-
-  while (pos < buf.length - 1) {
-    if (buf[pos] === 0xff) {
-      const nxt = buf[pos + 1];
-      if (nxt === 0x00) { pos += 2; continue; }           // stuffed byte
-      if (nxt >= 0xd0 && nxt <= 0xd7) {                   // RST marker
-        pos += 2;
-        rstIdx++;
-        const mcuStart = rstIdx * restartInterval;
-        if (mcuStart < totalMCUs) intervals.push({ byteOffset: pos, mcuStart });
-        continue;
-      }
-      break; // non-RST marker = end of scan data
-    }
-    pos++;
-  }
-  return intervals;
-}
-
-// ── Scan dependency analysis ─────────────────────────────────────────────────
-//
-// Progressive JPEG scans that touch the same (component, spectral range) must
-// execute in file order because later scans refine what earlier ones wrote.
-// Scans on different components or non-overlapping spectral ranges are fully
-// independent and can run in parallel (different chunks of coeffBufs).
-//
-// buildScanWaves() groups scans into sequential "waves" where every scan
-// within a wave is independent of every other scan in the same wave.
-
-function scanConflicts(a: ScanInfo, b: ScanInfo): boolean {
-  const aComps = new Set(a.scanComps.map(s => s.ci));
-  for (const { ci } of b.scanComps) {
-    if (aComps.has(ci) && a.Ss <= b.Se && b.Ss <= a.Se) return true;
-  }
-  return false;
-}
-
-function buildScanWaves(scans: ScanInfo[]): ScanInfo[][] {
-  const waves: ScanInfo[][] = [];
-  for (const scan of scans) {
-    // Place scan in the wave AFTER the last wave that has a conflicting scan.
-    // This preserves file order within each (component, spectral) chain.
-    let lastConflict = -1;
-    for (let i = 0; i < waves.length; i++) {
-      if (waves[i].some(s => scanConflicts(s, scan))) lastConflict = i;
-    }
-    const target = lastConflict + 1;
-    if (!waves[target]) waves[target] = [];
-    waves[target].push(scan);
-  }
-  return waves;
-}
 
 async function decodeProgressive(f: JPEGFile): Promise<VisionFrame> {
   const { width, height, comps, qtables, scans, buf } = f;
@@ -732,96 +731,173 @@ async function decodeProgressive(f: JPEGFile): Promise<VisionFrame> {
   const nbY = comps.map((c) => mcuRows * c.vf);
   const totalBlocks = nbX.reduce((sum, x, i) => sum + x * nbY[i], 0);
 
-  // ── Parallel scan parse ──────────────────────────────────────────────────
-  // Each progressive scan is an independent bitstream: different spectral
-  // range OR different component.  We dispatch all scans simultaneously to
-  // worker threads that write into shared coefficient SABs.
-  //
-  // Zero-copy: the raw JPEG bytes are copied once to a SharedArrayBuffer so
-  // all workers can read from it without additional copies.
-
-  const _tp0 = performance.now();
-
-  // Coefficient accumulation buffers (SharedArrayBuffer — workers write here)
+  // Coefficient accumulation buffers [ci][blockIdx*64 + zzIdx] = quantised Int16
   const coeffBufs = comps.map((_, ci) => {
     const length = nbX[ci] * nbY[ci] * 64;
     return new Int16Array(new SharedArrayBuffer(length * Int16Array.BYTES_PER_ELEMENT));
   });
-  const coeffSABs = coeffBufs.map(cb => cb.buffer as SharedArrayBuffer);
+  for (const scan of scans) {
+    const { nComps, scanComps, Ss, Se, Ah, Al, dataStart } = scan;
+    const reader = new BitReader(buf, dataStart);
+    const dcPrev = new Int32Array(nc);
+    let eobRun = 0; // EOB run counter — persists across MCUs within the scan
 
-  // Copy raw JPEG bytes to SAB once (shared read across all scan workers)
-  const sharedBuf = new SharedArrayBuffer(buf.byteLength);
-  new Uint8Array(sharedBuf).set(buf);
+    // Interleaved scans use the standard MCU grid;
+    // non-interleaved (single-component) scans iterate over that component's block grid.
+    const interleaved = nComps > 1;
+    const gridCols = interleaved ? mcuCols : nbX[scanComps[0].ci];
+    const gridRows = interleaved ? mcuRows : nbY[scanComps[0].ci];
 
-  const compHf = comps.map(c => c.hf);
-  const compVf = comps.map(c => c.vf);
+    for (let mr = 0; mr < gridRows; mr++) {
+      for (let mc = 0; mc < gridCols; mc++) {
+        for (const { ci, dcId, acId } of scanComps) {
+          const dc = scan.dcHuff[dcId];
+          const ac = scan.acHuff[acId];
 
-  // Group scans into dependency waves (independent scans in each wave run in parallel,
-  // waves execute sequentially to preserve refinement pass ordering).
-  const waves = buildScanWaves(scans);
-  const scanPool = getJpegScanWorkerPool();
+          // In interleaved scans each MCU holds hf×vf blocks per component.
+          // In non-interleaved scans each MCU is exactly one block.
+          const bRows = interleaved ? comps[ci].vf : 1;
+          const bCols = interleaved ? comps[ci].hf : 1;
 
-  // Each scan uses its OWN table snapshot — progressive JPEGs can redefine
-  // Huffman tables between scans with the same IDs (first-pass vs refinement).
-  const makeScanJob = (scan: ScanInfo, extra: Partial<Parameters<typeof scanPool.run>[0]> = {}) =>
-    scanPool.run({
-      buf: sharedBuf,
-      dataStart: scan.dataStart,
-      nComps: scan.nComps,
-      scanComps: scan.scanComps,
-      Ss: scan.Ss, Se: scan.Se, Ah: scan.Ah, Al: scan.Al,
-      mcuCols, mcuRows,
-      nbX, nbY, compHf, compVf,
-      dcRaw: scan.dcRawData,
-      acRaw: scan.acRawData,
-      coeffBufs: coeffSABs,
-      ...extra,
-    }).catch((e: unknown) => {
-      process.stderr.write(`[progressive] SCAN WORKER ERROR: ${e}\n`);
-    });
+          for (let brow = 0; brow < bRows; brow++) {
+            for (let bcol = 0; bcol < bCols; bcol++) {
+              const col = interleaved ? mc * comps[ci].hf + bcol : mc;
+              const row = interleaved ? mr * comps[ci].vf + brow : mr;
+              const bi = row * nbX[ci] + col;
+              const coeffs = coeffBufs[ci];
+              const bo = bi * 64;
+              // ── DC first pass ─────────────────────────────────────
+              if (Ss === 0 && Ah === 0) {
+                const cat = dc!.decode(reader);
+                dcPrev[ci] += cat === 0 ? 0 : signExtend(reader.read(cat), cat);
+                coeffs[bo] = dcPrev[ci] << Al;
+              }
 
-  const waveTimes: number[] = [];
-  let wave: ScanInfo[] = [];
-  for (wave of waves) {
-    const wt0 = performance.now();
+              // ── DC refinement ─────────────────────────────────────
+              else if (Ss === 0 && Ah > 0) {
+                if (reader.read(1)) {
+                  coeffs[bo] |= 1 << Al;
+                }
+              }
 
-    // Single non-interleaved scan + JPEG has restart markers → split by interval
-    if (wave.length === 1 && wave[0].nComps === 1 && f.restartInterval > 0) {
-      const scan = wave[0];
-      const ci = scan.scanComps[0].ci;
-      const totalMCUs = nbX[ci] * nbY[ci];
-      const intervals = findRestartIntervals(buf, scan.dataStart, f.restartInterval, totalMCUs);
+              // ── AC first pass ─────────────────────────────────────
+              else if (Ss > 0 && Ah === 0) {
+                if (eobRun > 0) {
+                  eobRun--;
+                } else {
+                  let k = Ss;
+                  while (k <= Se) {
+                    const sym = ac!.decode(reader);
+                    const ssss = sym & 0xf;
+                    const rrrr = (sym >> 4) & 0xf;
+                    if (ssss === 0) {
+                      if (rrrr === 15) {
+                        k += 16; // ZRL: skip 16 positions
+                      } else if (rrrr === 0) {
+                        break; // EOB1: this block done
+                      } else {
+                        // EOB run: current block + (decoded_count - 1) more
+                        eobRun = (1 << rrrr) + reader.read(rrrr) - 1;
+                        break;
+                      }
+                    } else {
+                      k += rrrr;
+                      if (k > Se) {
+                        break;
+                      }
+                      coeffs[bo + k] = signExtend(reader.read(ssss), ssss) << Al;
+                      k++;
+                    }
+                  }
+                }
+              }
 
-      if (intervals.length > 1) {
-        process.stderr.write(`[progressive] wave2 RST split: ${intervals.length} intervals (DRI=${f.restartInterval})\n`);
-        await Promise.all(intervals.map((iv, idx) => {
-          const mcuCount = idx + 1 < intervals.length
-            ? intervals[idx + 1].mcuStart - iv.mcuStart
-            : totalMCUs - iv.mcuStart;
-          return makeScanJob(scan, { dataStart: iv.byteOffset, mcuOffset: iv.mcuStart, mcuCount });
-        }));
-        waveTimes.push(performance.now() - wt0);
-        continue;
+              // ── AC refinement ─────────────────────────────────────
+              else if (Ss > 0 && Ah > 0) {
+                const bit1 = 1 << Al;
+                const refine = (v: number) => (v > 0 ? v + bit1 : v - bit1);
+
+                if (eobRun > 0) {
+                  // Block is an EOB: just refine any already-nonzero coefficients
+                  for (let k = Ss; k <= Se; k++) {
+                    if (coeffs[bo + k] !== 0 && reader.read(1)) {
+                      coeffs[bo + k] = refine(coeffs[bo + k]);
+                    }
+                  }
+                  eobRun--;
+                } else {
+                  let k = Ss;
+                  outer: while (k <= Se) {
+                    const sym = ac!.decode(reader);
+                    const ssss = sym & 0xf;
+                    let rrrr = (sym >> 4) & 0xf;
+
+                    if (ssss === 0) {
+                      if (rrrr === 15) {
+                        // ZRL: advance past 16 zero-valued positions,
+                        // refining any nonzero coefficients we pass through
+                        let zeros = 16;
+                        while (k <= Se && zeros > 0) {
+                          if (coeffs[bo + k] !== 0) {
+                            if (reader.read(1)) {
+                              coeffs[bo + k] = refine(coeffs[bo + k]);
+                            }
+                          } else {
+                            zeros--;
+                          }
+                          k++;
+                        }
+                      } else {
+                        // EOB (possibly run)
+                        if (rrrr > 0) {
+                          eobRun = (1 << rrrr) + reader.read(rrrr) - 1;
+                        }
+                        // Refine remaining nonzeros in this block
+                        for (; k <= Se; k++) {
+                          if (coeffs[bo + k] !== 0 && reader.read(1)) {
+                            coeffs[bo + k] = refine(coeffs[bo + k]);
+                          }
+                        }
+                        break outer;
+                      }
+                    } else {
+                      // ssss=1: place a new nonzero.
+                      // First advance past `rrrr` zero-valued coefficients,
+                      // refining any nonzeros we encounter along the way.
+                      while (k <= Se) {
+                        if (coeffs[bo + k] !== 0) {
+                          if (reader.read(1)) {
+                            coeffs[bo + k] = refine(coeffs[bo + k]);
+                          }
+                          k++;
+                        } else {
+                          if (rrrr === 0) {
+                            break;
+                          }
+                          rrrr--;
+                          k++;
+                        }
+                      }
+                      // Place the new coefficient (1 bit → +/-1 level)
+                      if (k <= Se) {
+                        coeffs[bo + k] = signExtend(reader.read(1), 1) << Al;
+                        k++;
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        if (reader.restartSeen) {
+          dcPrev.fill(0);
+          eobRun = 0;
+        }
       }
     }
-
-    // No restart markers or interleaved scan — log so we know
-    if (wave.length === 1) {
-      process.stderr.write(`[progressive] wave${waves.indexOf(wave)} serial (DRI=${f.restartInterval})\n`);
-    }
-
-    await Promise.all(wave.map(s => makeScanJob(s)));
-    waveTimes.push(performance.now() - wt0);
   }
-
-  const _tp1 = performance.now();
-  const waveDetail = waves.map((w, i) =>
-    `${w.length}scan/${waveTimes[i].toFixed(0)}ms[${w.map(s => `Ss${s.Ss}Se${s.Se}Ah${s.Ah}ci${s.scanComps.map(c => c.ci).join('')}`).join(',')}]`
-  ).join(' → ');
-  process.stderr.write(
-    `[progressive] huffman-parse(parallel)=${(_tp1 - _tp0).toFixed(0)}ms\n` +
-    `  waves: ${waveDetail}\n`
-  );
 
   // ── Dequantise + IDCT ─────────────────────────────────────────────────────
   const planeW = nbX.map((n) => n * 8);
@@ -842,40 +918,37 @@ async function decodeProgressive(f: JPEGFile): Promise<VisionFrame> {
 
   const pool = getJpegIdctWorkerPool();
 
-  // Log worker file resolution for debugging
-  process.stderr.write(`[progressive] dispatching IDCT jobs to pool (${nc} components)\n`);
-
   const jobs: Promise<void>[] = [];
 
   for (let ci = 0; ci < nc; ci++) {
     const qt = qtables[comps[ci].qtId]!;
     const rows = nbY[ci];
-    // Use more chunks than workers so all cores stay busy
-    const chunks = Math.min(IDCT_CHUNKS_PER_COMP, rows);
+
+    const chunks = Math.min(4, rows);
     const rowsPerJob = Math.ceil(rows / chunks);
 
     for (let j = 0; j < chunks; j++) {
       const rowStart = j * rowsPerJob;
       const rowEnd = Math.min(rows, rowStart + rowsPerJob);
+
       if (rowStart >= rowEnd) continue;
 
-      jobs.push(
-        pool.run({
-          coeffBuffer: coeffBufs[ci].buffer as SharedArrayBuffer,
-          planeBuffer: planes[ci].buffer as SharedArrayBuffer,
-          qt,
-          nbX: nbX[ci],
-          rowStart,
-          rowEnd,
-          planeWidth: planeW[ci],
-        }).catch((e: unknown) => {
-          process.stderr.write(`[progressive] WORKER ERROR: ${e}\n`);
-        })
-      );
+      jobs.push(pool.run({
+        coeffBuffer: coeffBufs[ci].buffer as SharedArrayBuffer,
+        planeBuffer: planes[ci].buffer as SharedArrayBuffer,
+        qt,
+        nbX: nbX[ci],
+        rowStart,
+        rowEnd,
+        planeWidth: planeW[ci],
+      }));
     }
   }
   await Promise.all(jobs);
-  // Do NOT call pool.close() here — workers reuse via idle timeout
+
+  // Do not close the shared IDCT pool here. It is expected to be unref()
+  // or managed by an idle timeout by JpegIdctWorkerPool. Closing it per decode
+  // forces worker recreation in sequential benchmarks and hurts read/decode time.
   return planesToFrame(planes, planeW, comps, hMax, vMax, width, height);
 }
 function idctDCOnly(dc: number, out: Uint8Array, off: number, stride: number): void {
@@ -944,29 +1017,45 @@ function runIdctSync(
 }
 // ── Public read entry point ───────────────────────────────────────────────────
 
-export async function readJPEG(path: string): Promise<VisionFrame> {
-  const t0 = performance.now();
+export async function readJPEG(
+  path: string,
+  opts: JPEGReadOptions = {},
+): Promise<VisionFrame> {
   const raw = await fs.readFile(path);
-  const t1 = performance.now();
-
   const buf = new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
   const jpeg = parseFile(buf);
-  const t2 = performance.now();
 
-  const result = jpeg.sofType <= 1
-    ? await decodeBaseline(jpeg)
-    : await decodeProgressive(jpeg);
-  const t3 = performance.now();
+  const frame =
+    jpeg.sofType <= 1
+      ? decodeBaseline(jpeg)
+      : await decodeProgressive(jpeg);
 
-  // Internal breakdown written to stderr so it doesn't pollute stdout
-  process.stderr.write(
-    `[jpg] sof=${jpeg.sofType} ${jpeg.width}x${jpeg.height} ` +
-    `fileRead=${(t1 - t0).toFixed(0)}ms segParse=${(t2 - t1).toFixed(0)}ms ` +
-    `decode=${(t3 - t2).toFixed(0)}ms\n`
-  );
-  return result;
+  if (!opts.resize) {
+    return frame;
+  }
+
+  const { resize, resolveResizeSize } = await import("../kernels/geometry.js");
+
+  const resizeOpts: {
+    width?: number;
+    height?: number;
+    method: "nearest" | "bilinear" | "area";
+  } = {
+    method: opts.resize.method ?? "bilinear",
+  };
+
+  if (opts.resize.width !== undefined) {
+    resizeOpts.width = opts.resize.width;
+  }
+
+  if (opts.resize.height !== undefined) {
+    resizeOpts.height = opts.resize.height;
+  }
+
+  const size = resolveResizeSize(frame, resizeOpts);
+
+  return resize(frame, size.width, size.height, size.method);
 }
-
 // ═════════════════════════════════════════════════════════════════════════════
 //  PROGRESSIVE JPEG ENCODER  (SOF2, spectral selection, Annex-K tables)
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1112,13 +1201,120 @@ function encodeVal(v: number, cat: number): number {
 
 // ── Main encoder ──────────────────────────────────────────────────────────────
 
-export async function writeJPEG(path: string, frame: VisionFrame, quality = 85): Promise<void> {
-  if (frame.channels !== 3) {
-    throw new Error('writeJPEG: requires 3-channel RGB frame (.toRGB() first)');
+// ── OutputBuffer ─────────────────────────────────────────────────────────────
+
+class OutputBuffer {
+  private buf: Uint8Array;
+  private pos = 0;
+
+  constructor(cap: number) { this.buf = new Uint8Array(cap); }
+
+  private grow(n: number): void {
+    let c = this.buf.length;
+    while (c < this.pos + n) c *= 2;
+    const b = new Uint8Array(c);
+    b.set(this.buf.subarray(0, this.pos));
+    this.buf = b;
   }
+
+  writeByte(b: number): void {
+    if (this.pos >= this.buf.length) this.grow(1);
+    this.buf[this.pos++] = b;
+  }
+
+  writeBytes(data: ArrayLike<number>): void {
+    const len = data.length;
+    if (this.pos + len > this.buf.length) this.grow(len);
+    if (data instanceof Uint8Array) {
+      this.buf.set(data, this.pos);
+    } else {
+      for (let i = 0; i < len; i++) this.buf[this.pos + i] = data[i];
+    }
+    this.pos += len;
+  }
+
+  writeU16(v: number): void {
+    if (this.pos + 2 > this.buf.length) this.grow(2);
+    this.buf[this.pos++] = (v >> 8) & 0xff;
+    this.buf[this.pos++] = v & 0xff;
+  }
+
+  appendWriter(w: BitWriter2): void {
+    const d = w.data;
+    if (this.pos + d.length > this.buf.length) this.grow(d.length);
+    this.buf.set(d, this.pos);
+    this.pos += d.length;
+  }
+
+  get result(): Uint8Array { return this.buf.subarray(0, this.pos); }
+}
+
+// ── BitWriter2 — writes bits directly into Uint8Array ────────────────────────
+
+class BitWriter2 {
+  private buf: Uint8Array;
+  private pos = 0;
+  private bits = 0;
+  private left = 0;
+
+  constructor(cap: number) { this.buf = new Uint8Array(cap); }
+
+  write(value: number, length: number): void {
+    this.bits = (this.bits << length) | (value & ((1 << length) - 1));
+    this.left += length;
+    while (this.left >= 8) {
+      this.left -= 8;
+      const b = (this.bits >>> this.left) & 0xff;
+      if (this.pos + 2 > this.buf.length) {
+        const n = new Uint8Array(this.buf.length * 2);
+        n.set(this.buf);
+        this.buf = n;
+      }
+      this.buf[this.pos++] = b;
+      if (b === 0xff) this.buf[this.pos++] = 0x00;
+    }
+  }
+
+  flush(): void {
+    if (this.left > 0) {
+      if (this.pos + 2 > this.buf.length) {
+        const n = new Uint8Array(this.buf.length * 2);
+        n.set(this.buf);
+        this.buf = n;
+      }
+      const b = ((this.bits << (8 - this.left)) | ((1 << (8 - this.left)) - 1)) & 0xff;
+      this.buf[this.pos++] = b;
+      if (b === 0xff) this.buf[this.pos++] = 0x00;
+    }
+  }
+
+  get data(): Uint8Array { return this.buf.subarray(0, this.pos); }
+}
+
+// ── Segment helpers ───────────────────────────────────────────────────────────
+
+function writeDQT(out: OutputBuffer, id: number, qt: Uint8Array): void {
+  out.writeByte(0xff); out.writeByte(0xdb); out.writeU16(67); out.writeByte(id); out.writeBytes(qt);
+}
+
+function writeDHT(out: OutputBuffer, cls: number, id: number, bits: number[], vals: number[]): void {
+  out.writeByte(0xff); out.writeByte(0xc4); out.writeU16(2 + 1 + 16 + vals.length);
+  out.writeByte((cls << 4) | id); out.writeBytes(bits); out.writeBytes(vals);
+}
+
+function writeSOS(out: OutputBuffer, comps: Array<{ id: number; dcId: number; acId: number }>, Ss: number, Se: number, Ah: number, Al: number): void {
+  out.writeByte(0xff); out.writeByte(0xda); out.writeU16(2 + 1 + comps.length * 2 + 3);
+  out.writeByte(comps.length);
+  for (const c of comps) { out.writeByte(c.id); out.writeByte((c.dcId << 4) | c.acId); }
+  out.writeByte(Ss); out.writeByte(Se); out.writeByte((Ah << 4) | Al);
+}
+
+export async function writeJPEG(path: string, frame: VisionFrame, quality = 85): Promise<void> {
+  if (frame.channels !== 3) throw new Error('writeJPEG: requires 3-channel RGB frame (.toRGB() first)');
 
   const { width, height } = frame;
   const src = frame.data;
+  const n = width * height;
 
   const lumaQ = scaleQT(LUMA_QT, quality);
   const chromaQ = scaleQT(CHROMA_QT, quality);
@@ -1130,127 +1326,78 @@ export async function writeJPEG(path: string, frame: VisionFrame, quality = 85):
   const acLE = buildEnc(AC_L_BITS, AC_L_VALS);
   const acCE = buildEnc(AC_C_BITS, AC_C_VALS);
 
-  // RGB → YCbCr
-  const Y = new Uint8Array(width * height);
-  const Cb = new Uint8Array(width * height);
-  const Cr = new Uint8Array(width * height);
-  for (let i = 0, p = 0; i < width * height; i++, p += 3) {
-    const R = src[p],
-      G = src[p + 1],
-      B = src[p + 2];
-    Y[i] = clampU8(0.299 * R + 0.587 * G + 0.114 * B);
-    Cb[i] = clampU8(-0.168736 * R - 0.331264 * G + 0.5 * B + 128);
-    Cr[i] = clampU8(0.5 * R - 0.418688 * G - 0.081312 * B + 128);
+  // ── RGB → YCbCr (integer Q8, BT.601) ─────────────────────────────────────
+  // Y  = ( 77R + 150G + 29B) >> 8
+  // Cb = (-43R -  85G + 128B) >> 8 + 128
+  // Cr = (128R - 107G -  21B) >> 8 + 128
+  const Y = new Uint8Array(n);
+  const Cb = new Uint8Array(n);
+  const Cr = new Uint8Array(n);
+  for (let i = 0, p = 0; i < n; i++, p += 3) {
+    const R = src[p], G = src[p + 1], B = src[p + 2];
+    Y[i] = (77 * R + 150 * G + 29 * B) >> 8;
+    const cb = ((-43 * R - 85 * G + 128 * B) >> 8) + 128;
+    const cr = ((128 * R - 107 * G - 21 * B) >> 8) + 128;
+    Cb[i] = cb < 0 ? 0 : cb > 255 ? 255 : cb;
+    Cr[i] = cr < 0 ? 0 : cr > 255 ? 255 : cr;
   }
 
   const pw = Math.ceil(width / 8) * 8;
   const ph = Math.ceil(height / 8) * 8;
 
   function pad(p: Uint8Array): Uint8Array {
-    if (pw === width && ph === height) {
-      return p;
-    }
+    if (pw === width && ph === height) return p;
     const out = new Uint8Array(pw * ph);
     for (let y = 0; y < ph; y++) {
       const sy = Math.min(y, height - 1);
-      for (let x = 0; x < pw; x++) {
+      for (let x = 0; x < pw; x++)
         out[y * pw + x] = p[sy * width + Math.min(x, width - 1)];
-      }
     }
     return out;
   }
 
-  const yP = pad(Y),
-    cbP = pad(Cb),
-    crP = pad(Cr);
-  const mcuRows = ph / 8,
-    mcuCols = pw / 8;
+  const yP = pad(Y), cbP = pad(Cb), crP = pad(Cr);
+  const mcuRows = ph / 8, mcuCols = pw / 8;
   const nBlocks = mcuRows * mcuCols;
 
-  // Quantise all blocks in zigzag order
+  // ── FDCT + quantise — pre-allocated fdctTmp avoids per-block allocation ───
   const qcoeff = [new Int16Array(nBlocks * 64), new Int16Array(nBlocks * 64), new Int16Array(nBlocks * 64)];
   const planesArr = [yP, cbP, crP];
   const qts = [lumaQ, chromaQ, chromaQ];
   const dct = new Float64Array(64);
+  const fdctTmp = new Float64Array(64);
 
   for (let ci = 0; ci < 3; ci++) {
     const qt = qts[ci];
     for (let row = 0; row < mcuRows; row++) {
       for (let col = 0; col < mcuCols; col++) {
         const bi = row * mcuCols + col;
-        fdct8x8(planesArr[ci], row * 8 * pw + col * 8, pw, dct);
+        fdct8x8(planesArr[ci], row * 8 * pw + col * 8, pw, dct, fdctTmp);
         const qc = qcoeff[ci].subarray(bi * 64, bi * 64 + 64);
-        for (let k = 0; k < 64; k++) {
-          qc[k] = Math.round(dct[ZZ[k]] / qt[ZZ[k]]);
-        }
+        for (let k = 0; k < 64; k++) qc[k] = Math.round(dct[ZZ[k]] / qt[ZZ[k]]);
       }
     }
   }
 
-  // ── Assemble progressive JPEG ─────────────────────────────────────────────
+  // ── Assemble into OutputBuffer (zero-copy, no number[] boxing) ─────────────
+  const out = new OutputBuffer(Math.max(65536, nBlocks * 32));
 
-  const out: number[] = [
-    0xff,
-    0xd8,
-    0xff,
-    0xe0,
-    0x00,
-    0x10,
-    0x4a,
-    0x46,
-    0x49,
-    0x46,
-    0x00,
-    0x01,
-    0x01,
-    0x00,
-    0x00,
-    0x01,
-    0x00,
-    0x01,
-    0x00,
-    0x00,
-    ...dqtSeg(0, lumaZZ),
-    ...dqtSeg(1, chromaZZ),
-    ...seg(0xc2, [
-      // SOF2 — progressive
-      0x08,
-      height >> 8,
-      height & 0xff,
-      width >> 8,
-      width & 0xff,
-      0x03,
-      0x01,
-      0x11,
-      0x00,
-      0x02,
-      0x11,
-      0x01,
-      0x03,
-      0x11,
-      0x01,
-    ]),
-  ];
+  // SOI + APP0
+  out.writeBytes([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00]);
+  writeDQT(out, 0, lumaZZ);
+  writeDQT(out, 1, chromaZZ);
 
-  // ── Scan 0: DC all components, interleaved ────────────────────────────────
+  // SOF2
+  out.writeByte(0xff); out.writeByte(0xc2); out.writeU16(17);
+  out.writeBytes([0x08, height >> 8, height & 0xff, width >> 8, width & 0xff, 0x03,
+    0x01, 0x11, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01]);
 
-  out.push(
-    ...dhtSeg(0, 0, DC_L_BITS, DC_L_VALS),
-    ...dhtSeg(0, 1, DC_C_BITS, DC_C_VALS),
-    ...sosSeg(
-      [
-        { id: 1, dcId: 0, acId: 0 },
-        { id: 2, dcId: 1, acId: 1 },
-        { id: 3, dcId: 1, acId: 1 },
-      ],
-      0,
-      0,
-      0,
-      0,
-    ),
-  );
+  // ── Scan 0: DC all, interleaved ──────────────────────────────────────────
+  writeDHT(out, 0, 0, DC_L_BITS, DC_L_VALS);
+  writeDHT(out, 0, 1, DC_C_BITS, DC_C_VALS);
+  writeSOS(out, [{ id: 1, dcId: 0, acId: 0 }, { id: 2, dcId: 1, acId: 1 }, { id: 3, dcId: 1, acId: 1 }], 0, 0, 0, 0);
   {
-    const w = new BitWriter();
+    const w = new BitWriter2(Math.max(4096, nBlocks * 6));
     const dcPrev = [0, 0, 0];
     const dcEncs = [dcLE, dcCE, dcCE];
     for (let mr = 0; mr < mcuRows; mr++) {
@@ -1263,35 +1410,30 @@ export async function writeJPEG(path: string, frame: VisionFrame, quality = 85):
           const cat = valueCat(diff);
           const h = dcEncs[ci][cat]!;
           w.write(h.code, h.bits);
-          if (cat > 0) {
-            w.write(encodeVal(diff, cat), cat);
-          }
+          if (cat > 0) w.write(encodeVal(diff, cat), cat);
         }
       }
     }
     w.flush();
-    out.push(...w.out);
+    out.appendWriter(w);
   }
 
-  // ── Scans 1-4: AC, non-interleaved ───────────────────────────────────────
-
+  // ── Scans 1-4: AC, non-interleaved ──────────────────────────────────────
   const acScans = [
     { ci: 0, id: 1, Ss: 1, Se: 5, enc: acLE, dhtId: 0 },
     { ci: 0, id: 1, Ss: 6, Se: 63, enc: acLE, dhtId: 0 },
     { ci: 1, id: 2, Ss: 1, Se: 63, enc: acCE, dhtId: 1 },
     { ci: 2, id: 3, Ss: 1, Se: 63, enc: acCE, dhtId: 1 },
   ];
-
   let lastDhtId = -1;
   for (const { ci, id, Ss, Se, enc, dhtId } of acScans) {
     if (dhtId !== lastDhtId) {
       const [bits, vals] = dhtId === 0 ? [AC_L_BITS, AC_L_VALS] : [AC_C_BITS, AC_C_VALS];
-      out.push(...dhtSeg(1, dhtId, bits, vals));
+      writeDHT(out, 1, dhtId, bits, vals);
       lastDhtId = dhtId;
     }
-    out.push(...sosSeg([{ id, dcId: 0, acId: dhtId }], Ss, Se, 0, 0));
-
-    const w = new BitWriter();
+    writeSOS(out, [{ id, dcId: 0, acId: dhtId }], Ss, Se, 0, 0);
+    const w = new BitWriter2(Math.max(4096, nBlocks * 4));
     for (let bi = 0; bi < nBlocks; bi++) {
       const qc = qcoeff[ci].subarray(bi * 64, bi * 64 + 64);
       let run = 0;
@@ -1299,10 +1441,7 @@ export async function writeJPEG(path: string, frame: VisionFrame, quality = 85):
         const v = qc[k];
         if (v === 0) {
           run++;
-          if (run === 16) {
-            w.write(enc[0xf0]!.code, enc[0xf0]!.bits);
-            run = 0;
-          }
+          if (run === 16) { w.write(enc[0xf0]!.code, enc[0xf0]!.bits); run = 0; }
         } else {
           const cat = valueCat(v);
           const h = enc[(run << 4) | cat]!;
@@ -1311,29 +1450,15 @@ export async function writeJPEG(path: string, frame: VisionFrame, quality = 85):
           run = 0;
         }
       }
-      if (run > 0) {
-        const eob = enc[0]!;
-        w.write(eob.code, eob.bits);
-      }
+      if (run > 0) { const eob = enc[0]!; w.write(eob.code, eob.bits); }
     }
     w.flush();
-    pushMany(out, w.out);
-
+    out.appendWriter(w);
   }
 
-  // EOI
-  out.push(0xff, 0xd9);
+  out.writeByte(0xff); out.writeByte(0xd9);
 
-  await fs.writeFile(path, Buffer.from(Uint8Array.from(out).buffer));
-}
-function pushMany(dst: number[], src: ArrayLike<number>): void {
-  const chunk = 8192;
-
-  for (let i = 0; i < src.length; i += chunk) {
-    const end = Math.min(src.length, i + chunk);
-
-    for (let j = i; j < end; j++) {
-      dst.push(src[j]);
-    }
-  }
+  // Write directly from Uint8Array — no intermediate number[] conversion
+  const res = out.result;
+  await fs.writeFile(path, Buffer.from(res.buffer, res.byteOffset, res.byteLength));
 }
