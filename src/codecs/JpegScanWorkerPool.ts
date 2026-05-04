@@ -34,7 +34,7 @@ const __dirname = dirname(__filename);
 // Hard cap: 10 workers covers 10-scan progressive JPEGs; beyond that, queueing
 // keeps throughput high without burning OS threads.
 const MAX_WORKERS = 10;
-const IDLE_TIMEOUT_MS = 30_000;   // longer than before — avoids recreation churn
+const IDLE_TIMEOUT_MS = 30_000; // longer than before — avoids recreation churn
 
 export interface RawHuffTable {
   lengths: number[];
@@ -51,10 +51,16 @@ export interface ScanJob {
   // Scan geometry
   nComps: number;
   scanComps: Array<{ ci: number; dcId: number; acId: number }>;
-  Ss: number; Se: number; Ah: number; Al: number;
-  mcuCols: number; mcuRows: number;
-  nbX: number[]; nbY: number[];
-  compHf: number[]; compVf: number[];
+  Ss: number;
+  Se: number;
+  Ah: number;
+  Al: number;
+  mcuCols: number;
+  mcuRows: number;
+  nbX: number[];
+  nbY: number[];
+  compHf: number[];
+  compVf: number[];
 
   // Huffman tables — snapshot from this scan's SOS (each scan owns its tables)
   dcRaw: (RawHuffTable | null)[];
@@ -70,7 +76,10 @@ export interface ScanJob {
 
 // ── Worker pool ───────────────────────────────────────────────────────────────
 
-interface Pending { resolve: () => void; reject: (e: Error) => void; }
+interface Pending {
+  resolve: () => void;
+  reject: (e: Error) => void;
+}
 
 interface QueuedJob {
   id: number;
@@ -80,14 +89,16 @@ interface QueuedJob {
 
 class JpegScanWorkerPool {
   private readonly workers: Worker[] = [];
-  private readonly freeList: number[] = [];    // indices of idle workers
+  private readonly freeList: number[] = []; // indices of idle workers
   private readonly jobQueue: QueuedJob[] = [];
   private readonly pending = new Map<number, { pending: Pending; workerId: number }>();
   private seq = 0;
   private closed = false;
   private idleTimer: NodeJS.Timeout | null = null;
 
-  get workerCount() { return this.workers.length; }
+  get workerCount() {
+    return this.workers.length;
+  }
 
   constructor(size = Math.min(MAX_WORKERS, Math.max(1, cpus().length - 1))) {
     const workerFile = join(__dirname, '../workers/jpeg-scan.worker.js');
@@ -99,11 +110,16 @@ class JpegScanWorkerPool {
       const wid = i;
       w.on('message', (msg: { id: number; ok: boolean; error?: string }) => {
         const entry = this.pending.get(msg.id);
-        if (!entry) return;
+        if (!entry) {
+          return;
+        }
         this.pending.delete(msg.id);
 
-        if (msg.ok) entry.pending.resolve();
-        else entry.pending.reject(new Error(msg.error ?? 'scan worker failed'));
+        if (msg.ok) {
+          entry.pending.resolve();
+        } else {
+          entry.pending.reject(new Error(msg.error ?? 'scan worker failed'));
+        }
 
         // Worker is now free — assign next queued job immediately
         const next = this.jobQueue.shift();
@@ -115,9 +131,11 @@ class JpegScanWorkerPool {
         }
       });
 
-      w.on('error', err => {
+      w.on('error', (err) => {
         const error = err instanceof Error ? err : new Error(String(err));
-        for (const { pending: p } of this.pending.values()) p.reject(error);
+        for (const { pending: p } of this.pending.values()) {
+          p.reject(error);
+        }
         this.pending.clear();
         this.jobQueue.length = 0;
       });
@@ -127,8 +145,10 @@ class JpegScanWorkerPool {
     }
   }
 
-  run(job: ScanJob): Promise<void> {
-    if (this.closed) return Promise.reject(new Error('JpegScanWorkerPool is closed'));
+  async run(job: ScanJob): Promise<void> {
+    if (this.closed) {
+      return Promise.reject(new Error('JpegScanWorkerPool is closed'));
+    }
     this.cancelIdleClose();
 
     const id = ++this.seq;
@@ -157,30 +177,45 @@ class JpegScanWorkerPool {
   }
 
   private scheduleIdleClose(): void {
-    if (this.closed || this.pending.size > 0 || this.jobQueue.length > 0) return;
+    if (this.closed || this.pending.size > 0 || this.jobQueue.length > 0) {
+      return;
+    }
     this.cancelIdleClose();
-    this.idleTimer = setTimeout(() => { void this.close(); }, IDLE_TIMEOUT_MS);
+    this.idleTimer = setTimeout(() => {
+      void this.close();
+    }, IDLE_TIMEOUT_MS);
     this.idleTimer.unref();
   }
 
   private cancelIdleClose(): void {
-    if (!this.idleTimer) return;
+    if (!this.idleTimer) {
+      return;
+    }
     clearTimeout(this.idleTimer);
     this.idleTimer = null;
   }
 
   async close(): Promise<void> {
-    if (this.closed) return;
+    if (this.closed) {
+      return;
+    }
     this.closed = true;
     this.cancelIdleClose();
     const err = new Error('JpegScanWorkerPool closed');
-    for (const { pending: p } of this.pending.values()) p.reject(err);
-    for (const qj of this.jobQueue) qj.pending.reject(err);
+    for (const { pending: p } of this.pending.values()) {
+      p.reject(err);
+    }
+    for (const qj of this.jobQueue) {
+      qj.pending.reject(err);
+    }
     this.pending.clear();
     this.jobQueue.length = 0;
-    const ws = [...this.workers]; this.workers.length = 0;
-    await Promise.allSettled(ws.map(w => w.terminate()));
-    if (sharedScanPool === this) sharedScanPool = null;
+    const ws = [...this.workers];
+    this.workers.length = 0;
+    await Promise.allSettled(ws.map(async (w) => w.terminate()));
+    if (sharedScanPool === this) {
+      sharedScanPool = null;
+    }
   }
 }
 

@@ -28,7 +28,6 @@ const ZZ = new Uint8Array([
 // ── IDCT / FDCT ───────────────────────────────────────────────────────────────
 const JPEG_IDCT_WORKER_THRESHOLD_BLOCKS = 4096;
 const INV_SQRT2 = 1 / Math.SQRT2;
-const COS = Array.from({ length: 8 }, (_, u) => Float64Array.from({ length: 8 }, (__, x) => Math.cos(((2 * x + 1) * u * Math.PI) / 16)));
 const COS8 = new Float64Array(64);
 
 for (let u = 0; u < 8; u++) {
@@ -104,24 +103,53 @@ function idct8x8(coeff: Float64Array, tmp: Float64Array, out: Uint8Array, off: n
 // Uses flat COS8[u*8+x] instead of COS[u][x] for better cache behaviour.
 function fdct8x8(src: Uint8Array, srcOff: number, srcStride: number, out: Float64Array, tmp: Float64Array): void {
   for (let y = 0; y < 8; y++) {
-    const b = y * srcStride + srcOff, tb = y * 8;
-    const s0 = src[b] - 128, s1 = src[b + 1] - 128, s2 = src[b + 2] - 128, s3 = src[b + 3] - 128;
-    const s4 = src[b + 4] - 128, s5 = src[b + 5] - 128, s6 = src[b + 6] - 128, s7 = src[b + 7] - 128;
+    const b = y * srcStride + srcOff,
+      tb = y * 8;
+    const s0 = src[b] - 128,
+      s1 = src[b + 1] - 128,
+      s2 = src[b + 2] - 128,
+      s3 = src[b + 3] - 128;
+    const s4 = src[b + 4] - 128,
+      s5 = src[b + 5] - 128,
+      s6 = src[b + 6] - 128,
+      s7 = src[b + 7] - 128;
     for (let u = 0; u < 8; u++) {
       const ub = u * 8;
-      tmp[tb + u] = (s0 * COS8[ub] + s1 * COS8[ub + 1] + s2 * COS8[ub + 2] + s3 * COS8[ub + 3] +
-        s4 * COS8[ub + 4] + s5 * COS8[ub + 5] + s6 * COS8[ub + 6] + s7 * COS8[ub + 7])
-        * (u === 0 ? INV_SQRT2 : 1) * 0.5;
+      tmp[tb + u] =
+        (s0 * COS8[ub] +
+          s1 * COS8[ub + 1] +
+          s2 * COS8[ub + 2] +
+          s3 * COS8[ub + 3] +
+          s4 * COS8[ub + 4] +
+          s5 * COS8[ub + 5] +
+          s6 * COS8[ub + 6] +
+          s7 * COS8[ub + 7]) *
+        (u === 0 ? INV_SQRT2 : 1) *
+        0.5;
     }
   }
   for (let u = 0; u < 8; u++) {
-    const t0 = tmp[u], t1 = tmp[8 + u], t2 = tmp[16 + u], t3 = tmp[24 + u];
-    const t4 = tmp[32 + u], t5 = tmp[40 + u], t6 = tmp[48 + u], t7 = tmp[56 + u];
+    const t0 = tmp[u],
+      t1 = tmp[8 + u],
+      t2 = tmp[16 + u],
+      t3 = tmp[24 + u];
+    const t4 = tmp[32 + u],
+      t5 = tmp[40 + u],
+      t6 = tmp[48 + u],
+      t7 = tmp[56 + u];
     for (let v = 0; v < 8; v++) {
       const vb = v * 8;
-      out[v * 8 + u] = (t0 * COS8[vb] + t1 * COS8[vb + 1] + t2 * COS8[vb + 2] + t3 * COS8[vb + 3] +
-        t4 * COS8[vb + 4] + t5 * COS8[vb + 5] + t6 * COS8[vb + 6] + t7 * COS8[vb + 7])
-        * (v === 0 ? INV_SQRT2 : 1) * 0.5;
+      out[v * 8 + u] =
+        (t0 * COS8[vb] +
+          t1 * COS8[vb + 1] +
+          t2 * COS8[vb + 2] +
+          t3 * COS8[vb + 3] +
+          t4 * COS8[vb + 4] +
+          t5 * COS8[vb + 5] +
+          t6 * COS8[vb + 6] +
+          t7 * COS8[vb + 7]) *
+        (v === 0 ? INV_SQRT2 : 1) *
+        0.5;
     }
   }
 }
@@ -136,7 +164,7 @@ class BitReader {
   constructor(
     private buf: Uint8Array,
     public pos: number,
-  ) { }
+  ) {}
 
   get restartSeen(): boolean {
     const v = this._rst;
@@ -496,7 +524,7 @@ function planesToFrame420(planes: Uint8Array[], pw: number[], W: number, H: numb
 
       dst[out++] = r < 0 ? 0 : r > 255 ? 255 : r;
       dst[out++] = g < 0 ? 0 : g > 255 ? 255 : g;
-      dst[out++] = b < 0 ? 0 : b > 255 ? 255 : b;
+      dst[out] = b < 0 ? 0 : b > 255 ? 255 : b;
     }
   }
 
@@ -539,15 +567,7 @@ function planesToFrame444(planes: Uint8Array[], pw: number[], W: number, H: numb
   return frame;
 }
 
-function planesToFrameGeneric(
-  planes: Uint8Array[],
-  pw: number[],
-  comps: Comp[],
-  hMax: number,
-  vMax: number,
-  W: number,
-  H: number,
-): VisionFrame {
+function planesToFrameGeneric(planes: Uint8Array[], pw: number[], comps: Comp[], hMax: number, vMax: number, W: number, H: number): VisionFrame {
   const frame = new VisionFrame(W, H, 3);
   const dst = frame.data;
 
@@ -907,9 +927,7 @@ async function decodeProgressive(f: JPEGFile): Promise<VisionFrame> {
   const planes = comps.map((_, ci) => {
     const size = planeW[ci] * planeH[ci];
 
-    return useWorkers
-      ? new Uint8Array(new SharedArrayBuffer(size))
-      : new Uint8Array(size);
+    return useWorkers ? new Uint8Array(new SharedArrayBuffer(size)) : new Uint8Array(size);
   });
   if (!useWorkers) {
     runIdctSync(coeffBufs, planes, qtables, comps, nbX, nbY, planeW);
@@ -931,17 +949,21 @@ async function decodeProgressive(f: JPEGFile): Promise<VisionFrame> {
       const rowStart = j * rowsPerJob;
       const rowEnd = Math.min(rows, rowStart + rowsPerJob);
 
-      if (rowStart >= rowEnd) continue;
+      if (rowStart >= rowEnd) {
+        continue;
+      }
 
-      jobs.push(pool.run({
-        coeffBuffer: coeffBufs[ci].buffer as SharedArrayBuffer,
-        planeBuffer: planes[ci].buffer as SharedArrayBuffer,
-        qt,
-        nbX: nbX[ci],
-        rowStart,
-        rowEnd,
-        planeWidth: planeW[ci],
-      }));
+      jobs.push(
+        pool.run({
+          coeffBuffer: coeffBufs[ci].buffer,
+          planeBuffer: planes[ci].buffer as SharedArrayBuffer,
+          qt,
+          nbX: nbX[ci],
+          rowStart,
+          rowEnd,
+          planeWidth: planeW[ci],
+        }),
+      );
     }
   }
   await Promise.all(jobs);
@@ -983,7 +1005,7 @@ function runIdctSync(
   comps: Comp[],
   nbX: number[],
   nbY: number[],
-  planeW: number[]
+  planeW: number[],
 ): void {
   const dct = new Float64Array(64);
   const tmp = new Float64Array(64);
@@ -1017,31 +1039,25 @@ function runIdctSync(
 }
 // ── Public read entry point ───────────────────────────────────────────────────
 
-export async function readJPEG(
-  path: string,
-  opts: JPEGReadOptions = {},
-): Promise<VisionFrame> {
+export async function readJPEG(path: string, opts: JPEGReadOptions = {}): Promise<VisionFrame> {
   const raw = await fs.readFile(path);
   const buf = new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
   const jpeg = parseFile(buf);
 
-  const frame =
-    jpeg.sofType <= 1
-      ? decodeBaseline(jpeg)
-      : await decodeProgressive(jpeg);
+  const frame = jpeg.sofType <= 1 ? decodeBaseline(jpeg) : await decodeProgressive(jpeg);
 
   if (!opts.resize) {
     return frame;
   }
 
-  const { resize, resolveResizeSize } = await import("../kernels/geometry.js");
+  const { resize, resolveResizeSize } = await import('../kernels/geometry.js');
 
   const resizeOpts: {
     width?: number;
     height?: number;
-    method: "nearest" | "bilinear" | "area";
+    method: 'nearest' | 'bilinear' | 'area';
   } = {
-    method: opts.resize.method ?? "bilinear",
+    method: opts.resize.method ?? 'bilinear',
   };
 
   if (opts.resize.width !== undefined) {
@@ -1138,58 +1154,6 @@ function buildEnc(bitsArr: number[], valsArr: number[]): (HCode | undefined)[] {
   return tbl;
 }
 
-// ── Bit writer ────────────────────────────────────────────────────────────────
-
-class BitWriter {
-  readonly out: number[] = [];
-  private bits = 0;
-  private left = 0;
-
-  write(value: number, length: number): void {
-    this.bits = (this.bits << length) | (value & ((1 << length) - 1));
-    this.left += length;
-    while (this.left >= 8) {
-      this.left -= 8;
-      const b = (this.bits >>> this.left) & 0xff;
-      this.out.push(b);
-      if (b === 0xff) {
-        this.out.push(0x00);
-      }
-    }
-  }
-
-  flush(): void {
-    if (this.left > 0) {
-      const b = ((this.bits << (8 - this.left)) | ((1 << (8 - this.left)) - 1)) & 0xff;
-      this.out.push(b);
-      if (b === 0xff) {
-        this.out.push(0x00);
-      }
-    }
-  }
-}
-
-// ── JPEG segment builders ─────────────────────────────────────────────────────
-
-function seg(marker: number, data: number[]): number[] {
-  const len = data.length + 2;
-  return [0xff, marker, len >> 8, len & 0xff, ...data];
-}
-function dqtSeg(id: number, qt: Uint8Array): number[] {
-  return seg(0xdb, [id, ...qt]);
-}
-function dhtSeg(cls: number, id: number, bits: number[], vals: number[]): number[] {
-  return seg(0xc4, [(cls << 4) | id, ...bits, ...vals]);
-}
-function sosSeg(comps: Array<{ id: number; dcId: number; acId: number }>, Ss: number, Se: number, Ah: number, Al: number): number[] {
-  const d: number[] = [comps.length];
-  for (const c of comps) {
-    d.push(c.id, (c.dcId << 4) | c.acId);
-  }
-  d.push(Ss, Se, (Ah << 4) | Al);
-  return seg(0xda, d);
-}
-
 // ── Coefficient helpers ───────────────────────────────────────────────────────
 
 function valueCat(v: number): number {
@@ -1207,46 +1171,62 @@ class OutputBuffer {
   private buf: Uint8Array;
   private pos = 0;
 
-  constructor(cap: number) { this.buf = new Uint8Array(cap); }
+  constructor(cap: number) {
+    this.buf = new Uint8Array(cap);
+  }
 
   private grow(n: number): void {
     let c = this.buf.length;
-    while (c < this.pos + n) c *= 2;
+    while (c < this.pos + n) {
+      c *= 2;
+    }
     const b = new Uint8Array(c);
     b.set(this.buf.subarray(0, this.pos));
     this.buf = b;
   }
 
   writeByte(b: number): void {
-    if (this.pos >= this.buf.length) this.grow(1);
+    if (this.pos >= this.buf.length) {
+      this.grow(1);
+    }
     this.buf[this.pos++] = b;
   }
 
   writeBytes(data: ArrayLike<number>): void {
     const len = data.length;
-    if (this.pos + len > this.buf.length) this.grow(len);
+    if (this.pos + len > this.buf.length) {
+      this.grow(len);
+    }
     if (data instanceof Uint8Array) {
       this.buf.set(data, this.pos);
     } else {
-      for (let i = 0; i < len; i++) this.buf[this.pos + i] = data[i];
+      for (let i = 0; i < len; i++) {
+        this.buf[this.pos + i] = data[i];
+      }
     }
     this.pos += len;
   }
 
   writeU16(v: number): void {
-    if (this.pos + 2 > this.buf.length) this.grow(2);
+    if (this.pos + 2 > this.buf.length) {
+      this.grow(2);
+    }
     this.buf[this.pos++] = (v >> 8) & 0xff;
     this.buf[this.pos++] = v & 0xff;
   }
 
   appendWriter(w: BitWriter2): void {
     const d = w.data;
-    if (this.pos + d.length > this.buf.length) this.grow(d.length);
+    if (this.pos + d.length > this.buf.length) {
+      this.grow(d.length);
+    }
     this.buf.set(d, this.pos);
     this.pos += d.length;
   }
 
-  get result(): Uint8Array { return this.buf.subarray(0, this.pos); }
+  get result(): Uint8Array {
+    return this.buf.subarray(0, this.pos);
+  }
 }
 
 // ── BitWriter2 — writes bits directly into Uint8Array ────────────────────────
@@ -1257,7 +1237,9 @@ class BitWriter2 {
   private bits = 0;
   private left = 0;
 
-  constructor(cap: number) { this.buf = new Uint8Array(cap); }
+  constructor(cap: number) {
+    this.buf = new Uint8Array(cap);
+  }
 
   write(value: number, length: number): void {
     this.bits = (this.bits << length) | (value & ((1 << length) - 1));
@@ -1271,7 +1253,9 @@ class BitWriter2 {
         this.buf = n;
       }
       this.buf[this.pos++] = b;
-      if (b === 0xff) this.buf[this.pos++] = 0x00;
+      if (b === 0xff) {
+        this.buf[this.pos++] = 0x00;
+      }
     }
   }
 
@@ -1284,33 +1268,54 @@ class BitWriter2 {
       }
       const b = ((this.bits << (8 - this.left)) | ((1 << (8 - this.left)) - 1)) & 0xff;
       this.buf[this.pos++] = b;
-      if (b === 0xff) this.buf[this.pos++] = 0x00;
+      if (b === 0xff) {
+        this.buf[this.pos++] = 0x00;
+      }
     }
   }
 
-  get data(): Uint8Array { return this.buf.subarray(0, this.pos); }
+  get data(): Uint8Array {
+    return this.buf.subarray(0, this.pos);
+  }
 }
 
 // ── Segment helpers ───────────────────────────────────────────────────────────
 
 function writeDQT(out: OutputBuffer, id: number, qt: Uint8Array): void {
-  out.writeByte(0xff); out.writeByte(0xdb); out.writeU16(67); out.writeByte(id); out.writeBytes(qt);
+  out.writeByte(0xff);
+  out.writeByte(0xdb);
+  out.writeU16(67);
+  out.writeByte(id);
+  out.writeBytes(qt);
 }
 
 function writeDHT(out: OutputBuffer, cls: number, id: number, bits: number[], vals: number[]): void {
-  out.writeByte(0xff); out.writeByte(0xc4); out.writeU16(2 + 1 + 16 + vals.length);
-  out.writeByte((cls << 4) | id); out.writeBytes(bits); out.writeBytes(vals);
+  out.writeByte(0xff);
+  out.writeByte(0xc4);
+  out.writeU16(2 + 1 + 16 + vals.length);
+  out.writeByte((cls << 4) | id);
+  out.writeBytes(bits);
+  out.writeBytes(vals);
 }
 
 function writeSOS(out: OutputBuffer, comps: Array<{ id: number; dcId: number; acId: number }>, Ss: number, Se: number, Ah: number, Al: number): void {
-  out.writeByte(0xff); out.writeByte(0xda); out.writeU16(2 + 1 + comps.length * 2 + 3);
+  out.writeByte(0xff);
+  out.writeByte(0xda);
+  out.writeU16(2 + 1 + comps.length * 2 + 3);
   out.writeByte(comps.length);
-  for (const c of comps) { out.writeByte(c.id); out.writeByte((c.dcId << 4) | c.acId); }
-  out.writeByte(Ss); out.writeByte(Se); out.writeByte((Ah << 4) | Al);
+  for (const c of comps) {
+    out.writeByte(c.id);
+    out.writeByte((c.dcId << 4) | c.acId);
+  }
+  out.writeByte(Ss);
+  out.writeByte(Se);
+  out.writeByte((Ah << 4) | Al);
 }
 
 export async function writeJPEG(path: string, frame: VisionFrame, quality = 85): Promise<void> {
-  if (frame.channels !== 3) throw new Error('writeJPEG: requires 3-channel RGB frame (.toRGB() first)');
+  if (frame.channels !== 3) {
+    throw new Error('writeJPEG: requires 3-channel RGB frame (.toRGB() first)');
+  }
 
   const { width, height } = frame;
   const src = frame.data;
@@ -1334,7 +1339,9 @@ export async function writeJPEG(path: string, frame: VisionFrame, quality = 85):
   const Cb = new Uint8Array(n);
   const Cr = new Uint8Array(n);
   for (let i = 0, p = 0; i < n; i++, p += 3) {
-    const R = src[p], G = src[p + 1], B = src[p + 2];
+    const R = src[p],
+      G = src[p + 1],
+      B = src[p + 2];
     Y[i] = (77 * R + 150 * G + 29 * B) >> 8;
     const cb = ((-43 * R - 85 * G + 128 * B) >> 8) + 128;
     const cr = ((128 * R - 107 * G - 21 * B) >> 8) + 128;
@@ -1346,18 +1353,24 @@ export async function writeJPEG(path: string, frame: VisionFrame, quality = 85):
   const ph = Math.ceil(height / 8) * 8;
 
   function pad(p: Uint8Array): Uint8Array {
-    if (pw === width && ph === height) return p;
+    if (pw === width && ph === height) {
+      return p;
+    }
     const out = new Uint8Array(pw * ph);
     for (let y = 0; y < ph; y++) {
       const sy = Math.min(y, height - 1);
-      for (let x = 0; x < pw; x++)
+      for (let x = 0; x < pw; x++) {
         out[y * pw + x] = p[sy * width + Math.min(x, width - 1)];
+      }
     }
     return out;
   }
 
-  const yP = pad(Y), cbP = pad(Cb), crP = pad(Cr);
-  const mcuRows = ph / 8, mcuCols = pw / 8;
+  const yP = pad(Y),
+    cbP = pad(Cb),
+    crP = pad(Cr);
+  const mcuRows = ph / 8,
+    mcuCols = pw / 8;
   const nBlocks = mcuRows * mcuCols;
 
   // ── FDCT + quantise — pre-allocated fdctTmp avoids per-block allocation ───
@@ -1374,7 +1387,9 @@ export async function writeJPEG(path: string, frame: VisionFrame, quality = 85):
         const bi = row * mcuCols + col;
         fdct8x8(planesArr[ci], row * 8 * pw + col * 8, pw, dct, fdctTmp);
         const qc = qcoeff[ci].subarray(bi * 64, bi * 64 + 64);
-        for (let k = 0; k < 64; k++) qc[k] = Math.round(dct[ZZ[k]] / qt[ZZ[k]]);
+        for (let k = 0; k < 64; k++) {
+          qc[k] = Math.round(dct[ZZ[k]] / qt[ZZ[k]]);
+        }
       }
     }
   }
@@ -1388,14 +1403,26 @@ export async function writeJPEG(path: string, frame: VisionFrame, quality = 85):
   writeDQT(out, 1, chromaZZ);
 
   // SOF2
-  out.writeByte(0xff); out.writeByte(0xc2); out.writeU16(17);
-  out.writeBytes([0x08, height >> 8, height & 0xff, width >> 8, width & 0xff, 0x03,
-    0x01, 0x11, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01]);
+  out.writeByte(0xff);
+  out.writeByte(0xc2);
+  out.writeU16(17);
+  out.writeBytes([0x08, height >> 8, height & 0xff, width >> 8, width & 0xff, 0x03, 0x01, 0x11, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01]);
 
   // ── Scan 0: DC all, interleaved ──────────────────────────────────────────
   writeDHT(out, 0, 0, DC_L_BITS, DC_L_VALS);
   writeDHT(out, 0, 1, DC_C_BITS, DC_C_VALS);
-  writeSOS(out, [{ id: 1, dcId: 0, acId: 0 }, { id: 2, dcId: 1, acId: 1 }, { id: 3, dcId: 1, acId: 1 }], 0, 0, 0, 0);
+  writeSOS(
+    out,
+    [
+      { id: 1, dcId: 0, acId: 0 },
+      { id: 2, dcId: 1, acId: 1 },
+      { id: 3, dcId: 1, acId: 1 },
+    ],
+    0,
+    0,
+    0,
+    0,
+  );
   {
     const w = new BitWriter2(Math.max(4096, nBlocks * 6));
     const dcPrev = [0, 0, 0];
@@ -1410,7 +1437,9 @@ export async function writeJPEG(path: string, frame: VisionFrame, quality = 85):
           const cat = valueCat(diff);
           const h = dcEncs[ci][cat]!;
           w.write(h.code, h.bits);
-          if (cat > 0) w.write(encodeVal(diff, cat), cat);
+          if (cat > 0) {
+            w.write(encodeVal(diff, cat), cat);
+          }
         }
       }
     }
@@ -1441,7 +1470,10 @@ export async function writeJPEG(path: string, frame: VisionFrame, quality = 85):
         const v = qc[k];
         if (v === 0) {
           run++;
-          if (run === 16) { w.write(enc[0xf0]!.code, enc[0xf0]!.bits); run = 0; }
+          if (run === 16) {
+            w.write(enc[0xf0]!.code, enc[0xf0]!.bits);
+            run = 0;
+          }
         } else {
           const cat = valueCat(v);
           const h = enc[(run << 4) | cat]!;
@@ -1450,13 +1482,17 @@ export async function writeJPEG(path: string, frame: VisionFrame, quality = 85):
           run = 0;
         }
       }
-      if (run > 0) { const eob = enc[0]!; w.write(eob.code, eob.bits); }
+      if (run > 0) {
+        const eob = enc[0]!;
+        w.write(eob.code, eob.bits);
+      }
     }
     w.flush();
     out.appendWriter(w);
   }
 
-  out.writeByte(0xff); out.writeByte(0xd9);
+  out.writeByte(0xff);
+  out.writeByte(0xd9);
 
   // Write directly from Uint8Array — no intermediate number[] conversion
   const res = out.result;

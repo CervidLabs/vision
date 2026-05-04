@@ -17,7 +17,7 @@
  * - AC refine (Ss>0, Ah>0)
  */
 
-import { parentPort } from "node:worker_threads";
+import { parentPort } from 'node:worker_threads';
 
 // ── BitReader ────────────────────────────────────────────────────────────────
 
@@ -28,8 +28,8 @@ class BitReader {
 
   constructor(
     private readonly buf: Uint8Array,
-    public pos: number
-  ) { }
+    public pos: number,
+  ) {}
 
   get restartSeen(): boolean {
     const v = this._rst;
@@ -166,7 +166,7 @@ class HuffDec {
       }
     }
 
-    throw new Error("JPEG scan worker: bad Huffman code");
+    throw new Error('JPEG scan worker: bad Huffman code');
   }
 }
 
@@ -262,7 +262,6 @@ function parseSingleComponentScan(
 
         if (reader.restartSeen) {
           dcPrev.fill(0);
-          eobRun = 0;
         }
       }
     }
@@ -285,7 +284,6 @@ function parseSingleComponentScan(
 
         if (reader.restartSeen) {
           dcPrev.fill(0);
-          eobRun = 0;
         }
       }
     }
@@ -445,13 +443,7 @@ function parseSingleComponentScan(
 
 // ── Generic path: interleaved/multi-component scan ───────────────────────────
 
-function parseGenericScan(
-  reader: BitReader,
-  coeffs: Int16Array[],
-  dc: (HuffDec | null)[],
-  ac: (HuffDec | null)[],
-  job: ScanJob
-): void {
+function parseGenericScan(reader: BitReader, coeffs: Int16Array[], dc: (HuffDec | null)[], ac: (HuffDec | null)[], job: ScanJob): void {
   const { nComps, scanComps, Ss, Se, Ah, Al } = job;
   const { mcuCols, mcuRows, nbX, compHf, compVf } = job;
 
@@ -674,7 +666,7 @@ function parseScan(job: ScanJob): void {
 
 // ── Entry point ──────────────────────────────────────────────────────────────
 
-parentPort!.on("message", (job: ScanJob) => {
+parentPort!.on('message', (job: ScanJob) => {
   try {
     parseScan(job);
     parentPort!.postMessage({ id: job.id, ok: true });

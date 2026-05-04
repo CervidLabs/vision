@@ -8,22 +8,17 @@ import { clampU8, VisionFrame } from '../core/VisionFrame.js';
  * @param kw      Kernel width  (must be odd)
  * @param kh      Kernel height (must be odd)
  */
-export function convolve(
-  frame: VisionFrame,
-  kernel: number[],
-  kw: number,
-  kh: number
-): VisionFrame {
+export function convolve(frame: VisionFrame, kernel: number[], kw: number, kh: number): VisionFrame {
   if (kw % 2 === 0 || kh % 2 === 0) {
-    throw new Error("Kernel dimensions must be odd");
+    throw new Error('Kernel dimensions must be odd');
   }
 
   if (kernel.length !== kw * kh) {
-    throw new Error("Kernel length must equal kw * kh");
+    throw new Error('Kernel length must equal kw * kh');
   }
 
   if (frame.channels !== 1 && frame.channels !== 3) {
-    throw new Error("convolve supports 1 or 3-channel frames only");
+    throw new Error('convolve supports 1 or 3-channel frames only');
   }
 
   const { width, height, channels } = frame;
@@ -43,15 +38,21 @@ export function convolve(
 
         for (let ky = 0; ky < kh; ky++) {
           let sy = y + ky - ry;
-          if (sy < 0) sy = 0;
-          else if (sy >= height) sy = height - 1;
+          if (sy < 0) {
+            sy = 0;
+          } else if (sy >= height) {
+            sy = height - 1;
+          }
 
           const srcRow = sy * width * channels;
 
           for (let kx = 0; kx < kw; kx++) {
             let sx = x + kx - rx;
-            if (sx < 0) sx = 0;
-            else if (sx >= width) sx = width - 1;
+            if (sx < 0) {
+              sx = 0;
+            } else if (sx >= width) {
+              sx = width - 1;
+            }
 
             acc += src[srcRow + sx * channels + c] * kernel[ky * kw + kx];
           }

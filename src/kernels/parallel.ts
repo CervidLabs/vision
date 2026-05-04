@@ -141,7 +141,7 @@ export async function gaussianBlurParallel(
 //   scale < 0.5 in BOTH axes → 'area'    (box filter, no aliasing for >2× downscale)
 //   otherwise                → 'bilinear' (Q15 interpolation, good for upscale/mild downscale)
 
-const RESIZE_WORKER_THRESHOLD_PX = 3_000_000;   // ~3MP output (e.g. 2000×1500)
+const RESIZE_WORKER_THRESHOLD_PX = 3_000_000; // ~3MP output (e.g. 2000×1500)
 
 export async function resizeParallel(
   frame: VisionFrame,
@@ -151,7 +151,9 @@ export async function resizeParallel(
   numWorkers = Math.max(1, cpus().length - 1),
 ): Promise<VisionFrame> {
   const { width, height, channels } = frame;
-  if (newW <= 0 || newH <= 0) throw new Error('resizeParallel: dimensions must be positive');
+  if (newW <= 0 || newH <= 0) {
+    throw new Error('resizeParallel: dimensions must be positive');
+  }
 
   const scaleX = newW / width;
   const scaleY = newH / height;
@@ -164,12 +166,10 @@ export async function resizeParallel(
   // Fall back to the sequential implementation imported from geometry.ts.
   if (newW * newH < RESIZE_WORKER_THRESHOLD_PX) {
     const { resizeBilinear, resizeArea } = await import('./geometry.js');
-    return chosenMethod === 'area'
-      ? resizeArea(frame, newW, newH)
-      : resizeBilinear(frame, newW, newH);
+    return chosenMethod === 'area' ? resizeArea(frame, newW, newH) : resizeBilinear(frame, newW, newH);
   }
 
-  const out = new VisionFrame(newW, newH, channels as 1 | 3 | 4);
+  const out = new VisionFrame(newW, newH, channels);
   const workerFile = join(__dirname, '../workers/resize.worker.js');
   const rowsPerWorker = Math.ceil(newH / numWorkers);
   const jobs: Promise<void>[] = [];
@@ -184,22 +184,26 @@ export async function resizeParallel(
     const y1SAB = new SharedArrayBuffer(newH * 4);
     const wySAB = new SharedArrayBuffer(newH * 4);
 
-    const x0A = new Int32Array(x0SAB), x1A = new Int32Array(x1SAB), wxA = new Int32Array(wxSAB);
-    const y0A = new Int32Array(y0SAB), y1A = new Int32Array(y1SAB), wyA = new Int32Array(wySAB);
+    const x0A = new Int32Array(x0SAB),
+      x1A = new Int32Array(x1SAB),
+      wxA = new Int32Array(wxSAB);
+    const y0A = new Int32Array(y0SAB),
+      y1A = new Int32Array(y1SAB),
+      wyA = new Int32Array(wySAB);
 
     for (let x = 0; x < newW; x++) {
-      const fx = (x + 0.5) * width / newW - 0.5;
+      const fx = ((x + 0.5) * width) / newW - 0.5;
       const x0 = Math.max(0, Math.floor(fx));
       const x1 = Math.min(width - 1, x0 + 1);
-      x0A[x] = x0 * channels;   // store as byte offset directly
+      x0A[x] = x0 * channels; // store as byte offset directly
       x1A[x] = x1 * channels;
       wxA[x] = ((fx - x0) * 32768 + 0.5) | 0;
     }
     for (let y = 0; y < newH; y++) {
-      const fy = (y + 0.5) * height / newH - 0.5;
+      const fy = ((y + 0.5) * height) / newH - 0.5;
       const y0 = Math.max(0, Math.floor(fy));
       const y1 = Math.min(height - 1, y0 + 1);
-      y0A[y] = y0;   // row index (worker multiplies by srcStride)
+      y0A[y] = y0; // row index (worker multiplies by srcStride)
       y1A[y] = y1;
       wyA[y] = ((fy - y0) * 32768 + 0.5) | 0;
     }
@@ -207,15 +211,27 @@ export async function resizeParallel(
     for (let w = 0; w < numWorkers; w++) {
       const rowStart = w * rowsPerWorker;
       const rowEnd = Math.min(newH, rowStart + rowsPerWorker);
-      if (rowStart >= rowEnd) continue;
-      jobs.push(runWorker(workerFile, {
-        method: 'bilinear',
-        srcBuf: frame.buffer, dstBuf: out.buffer,
-        srcW: width, dstW: newW, channels,
-        x0Buf: x0SAB, x1Buf: x1SAB, wxBuf: wxSAB,
-        y0Buf: y0SAB, y1Buf: y1SAB, wyBuf: wySAB,
-        rowStart, rowEnd,
-      }));
+      if (rowStart >= rowEnd) {
+        continue;
+      }
+      jobs.push(
+        runWorker(workerFile, {
+          method: 'bilinear',
+          srcBuf: frame.buffer,
+          dstBuf: out.buffer,
+          srcW: width,
+          dstW: newW,
+          channels,
+          x0Buf: x0SAB,
+          x1Buf: x1SAB,
+          wxBuf: wxSAB,
+          y0Buf: y0SAB,
+          y1Buf: y1SAB,
+          wyBuf: wySAB,
+          rowStart,
+          rowEnd,
+        }),
+      );
     }
   } else {
     // Area: each worker gets scale factors and computes independently.
@@ -225,14 +241,24 @@ export async function resizeParallel(
     for (let w = 0; w < numWorkers; w++) {
       const rowStart = w * rowsPerWorker;
       const rowEnd = Math.min(newH, rowStart + rowsPerWorker);
-      if (rowStart >= rowEnd) continue;
-      jobs.push(runWorker(workerFile, {
-        method: 'area',
-        srcBuf: frame.buffer, dstBuf: out.buffer,
-        srcW: width, srcH: height, dstW: newW, channels,
-        scaleX: aScaleX, scaleY: aScaleY,
-        rowStart, rowEnd,
-      }));
+      if (rowStart >= rowEnd) {
+        continue;
+      }
+      jobs.push(
+        runWorker(workerFile, {
+          method: 'area',
+          srcBuf: frame.buffer,
+          dstBuf: out.buffer,
+          srcW: width,
+          srcH: height,
+          dstW: newW,
+          channels,
+          scaleX: aScaleX,
+          scaleY: aScaleY,
+          rowStart,
+          rowEnd,
+        }),
+      );
     }
   }
 

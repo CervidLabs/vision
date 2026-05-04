@@ -25,39 +25,36 @@ import { parentPort } from 'node:worker_threads';
 import { deflateRawSync, constants } from 'node:zlib';
 
 interface CompressJob {
-    id: number;
-    dataSAB: SharedArrayBuffer;  // shared raw scanline buffer (read-only)
-    offset: number;             // byte offset into dataSAB
-    length: number;             // number of bytes to compress
-    isFinal: boolean;
-    level: number;
+  id: number;
+  dataSAB: SharedArrayBuffer; // shared raw scanline buffer (read-only)
+  offset: number; // byte offset into dataSAB
+  length: number; // number of bytes to compress
+  isFinal: boolean;
+  level: number;
 }
 
 parentPort!.on('message', (job: CompressJob) => {
-    try {
-        // Zero-copy view of the shared input buffer
-        const input = Buffer.from(job.dataSAB, job.offset, job.length);
+  try {
+    // Zero-copy view of the shared input buffer
+    const input = Buffer.from(job.dataSAB, job.offset, job.length);
 
-        const flush = job.isFinal
-            ? constants.Z_FINISH       // final block: BFINAL=1, no sync marker
-            : constants.Z_SYNC_FLUSH;  // non-final: BFINAL=0, appends 00 00 00 FF FF
+    const flush = job.isFinal
+      ? constants.Z_FINISH // final block: BFINAL=1, no sync marker
+      : constants.Z_SYNC_FLUSH; // non-final: BFINAL=0, appends 00 00 00 FF FF
 
-        const compressed = deflateRawSync(input, { level: job.level, flush });
+    const compressed = deflateRawSync(input, { level: job.level, flush });
 
-        // Transfer the result's backing ArrayBuffer to the main thread (zero copy).
-        // Buffer.buffer might be a Node pool slab; slice() creates an owned copy
-        // that we can safely transfer.
-        const owned = compressed.buffer.slice(
-            compressed.byteOffset,
-            compressed.byteOffset + compressed.byteLength,
-        );
+    // Transfer the result's backing ArrayBuffer to the main thread (zero copy).
+    // Buffer.buffer might be a Node pool slab; slice() creates an owned copy
+    // that we can safely transfer.
+    const owned = compressed.buffer.slice(compressed.byteOffset, compressed.byteOffset + compressed.byteLength);
 
-        parentPort!.postMessage({ id: job.id, ok: true, data: owned }, [owned as ArrayBuffer]);
-    } catch (err) {
-        parentPort!.postMessage({
-            id: job.id,
-            ok: false,
-            error: err instanceof Error ? err.message : String(err),
-        });
-    }
+    parentPort!.postMessage({ id: job.id, ok: true, data: owned }, [owned]);
+  } catch (err) {
+    parentPort!.postMessage({
+      id: job.id,
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 });

@@ -1,26 +1,18 @@
-import { clampU8, VisionFrame } from "../core/VisionFrame.js";
+import { clampU8, VisionFrame } from '../core/VisionFrame.js';
 
-export type ResizeMethod = "nearest" | "bilinear" | "area";
+export type ResizeMethod = 'nearest' | 'bilinear' | 'area';
 
 export interface ResizeOptions {
   width?: number;
   height?: number;
-  fit?: "exact" | "contain" | "cover";
+  fit?: 'exact' | 'contain' | 'cover';
   method?: ResizeMethod;
 }
 
 /** Crop a rectangular region from a frame. */
-export function crop(
-  frame: VisionFrame,
-  x: number,
-  y: number,
-  width: number,
-  height: number
-): VisionFrame {
+export function crop(frame: VisionFrame, x: number, y: number, width: number, height: number): VisionFrame {
   if (x < 0 || y < 0 || x + width > frame.width || y + height > frame.height) {
-    throw new Error(
-      `crop(${x},${y},${width},${height}) out of bounds for ${frame.width}×${frame.height} frame`
-    );
+    throw new Error(`crop(${x},${y},${width},${height}) out of bounds for ${frame.width}×${frame.height} frame`);
   }
 
   const out = new VisionFrame(width, height, frame.channels);
@@ -133,12 +125,7 @@ export function resizeBilinear(frame: VisionFrame, newW: number, newH: number): 
       const d = dstRow + x * channels;
 
       for (let c = 0; c < channels; c++) {
-        dst[d + c] = clampU8(
-          src[p00 + c] * w00 +
-          src[p10 + c] * w10 +
-          src[p01 + c] * w01 +
-          src[p11 + c] * w11
-        );
+        dst[d + c] = clampU8(src[p00 + c] * w00 + src[p10 + c] * w10 + src[p01 + c] * w01 + src[p11 + c] * w11);
       }
     }
   }
@@ -150,7 +137,7 @@ export function resizeArea(frame: VisionFrame, newW: number, newH: number): Visi
   const { width, height, channels } = frame;
 
   if (newW <= 0 || newH <= 0) {
-    throw new Error("resizeArea: dimensions must be positive");
+    throw new Error('resizeArea: dimensions must be positive');
   }
 
   if (newW >= width || newH >= height) {
@@ -185,13 +172,17 @@ export function resizeArea(frame: VisionFrame, newW: number, newH: number): Visi
 
       for (let sy = yStart; sy <= yEnd; sy++) {
         const yOverlap = Math.min(srcY1, sy + 1) - Math.max(srcY0, sy);
-        if (yOverlap <= 0) continue;
+        if (yOverlap <= 0) {
+          continue;
+        }
 
         const srcRow = sy * width * channels;
 
         for (let sx = xStart; sx <= xEnd; sx++) {
           const xOverlap = Math.min(srcX1, sx + 1) - Math.max(srcX0, sx);
-          if (xOverlap <= 0) continue;
+          if (xOverlap <= 0) {
+            continue;
+          }
 
           const weight = xOverlap * yOverlap;
           const srcOff = srcRow + sx * channels;
@@ -214,18 +205,15 @@ export function resizeArea(frame: VisionFrame, newW: number, newH: number): Visi
   return out;
 }
 
-export function resolveResizeSize(
-  frame: VisionFrame,
-  opts: ResizeOptions
-): { width: number; height: number; method: ResizeMethod } {
-  const method = opts.method ?? "bilinear";
-  const fit = opts.fit ?? "exact";
+export function resolveResizeSize(frame: VisionFrame, opts: ResizeOptions): { width: number; height: number; method: ResizeMethod } {
+  const method = opts.method ?? 'bilinear';
+  const fit = opts.fit ?? 'exact';
 
   if (!opts.width && !opts.height) {
-    throw new Error("resize requires width, height, or both");
+    throw new Error('resize requires width, height, or both');
   }
 
-  if (fit === "exact") {
+  if (fit === 'exact') {
     if (opts.width && opts.height) {
       return { width: opts.width, height: opts.height, method };
     }
@@ -250,7 +238,7 @@ export function resolveResizeSize(
   }
 
   const scale =
-    fit === "contain"
+    fit === 'contain'
       ? Math.min(opts.width / frame.width, opts.height / frame.height)
       : Math.max(opts.width / frame.width, opts.height / frame.height);
 
@@ -261,28 +249,23 @@ export function resolveResizeSize(
   };
 }
 
-export function resize(
-  frame: VisionFrame,
-  newW: number,
-  newH: number,
-  method: ResizeMethod = "bilinear"
-): VisionFrame {
+export function resize(frame: VisionFrame, newW: number, newH: number, method: ResizeMethod = 'bilinear'): VisionFrame {
   if (newW <= 0 || newH <= 0) {
-    throw new Error("resize: dimensions must be positive");
+    throw new Error('resize: dimensions must be positive');
   }
 
   switch (method) {
-    case "nearest":
+    case 'nearest':
       return resizeNearest(frame, newW, newH);
 
-    case "bilinear":
+    case 'bilinear':
       return resizeBilinear(frame, newW, newH);
 
-    case "area":
+    case 'area':
       return resizeArea(frame, newW, newH);
 
     default:
-      throw new Error(`Unknown resize method: ${method satisfies never}`);
+      throw new Error(`Unknown resize method: ${method as string}`);
   }
 }
 
