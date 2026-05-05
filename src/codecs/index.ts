@@ -8,12 +8,20 @@ export interface WriteOptions {
   quality?: number;
   compressionLevel?: number;
   pngFilter?: 'none' | 'sub';
+
+  /**
+   * JPEG only.
+   * true/default = progressive SOF2.
+   * false = baseline SOF0.
+   */
+  progressive?: boolean;
 }
 export interface ReadOptions {
   resize?: {
     width?: number;
     height?: number;
-    method?: 'nearest' | 'bilinear' | 'area';
+    method?: "nearest" | "bilinear" | "area";
+    shrinkOnLoad?: boolean;
   };
 }
 
@@ -42,12 +50,13 @@ export async function writeFrame(path: string, frame: VisionFrame, opts: WriteOp
   switch (ext) {
     case '.jpg':
     case '.jpeg':
-      return writeJPEG(path, frame, opts.quality ?? 85);
-
+      return writeJPEG(path, frame, opts.quality ?? 85, {
+        progressive: opts.progressive ?? true,
+      });
     case '.png':
       return writePNG(path, frame, {
         level: opts.compressionLevel ?? 1,
-        filter: opts.pngFilter ?? 'sub',
+        filter: opts.pngFilter ?? 'none',
       });
     case '.ppm':
       return writePPM(path, frame);

@@ -92,7 +92,12 @@ export class VisionImage {
    * Supported: `.ppm`, `.png`, `.jpg`, `.jpeg`, `.webp`, `.tiff`, `.avif`
    */
   async save(path: string, opts: WriteOptions = {}): Promise<void> {
-    const frame = this.frame.channels === 1 ? Kernels.grayscaleToRGB(this.frame) : this.frame;
+    const lower = path.toLowerCase();
+
+    const needsRGB = lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.ppm');
+
+    const frame = needsRGB && this.frame.channels === 1 ? Kernels.grayscaleToRGB(this.frame) : this.frame;
+
     await writeFrame(path, frame, opts);
   }
 }

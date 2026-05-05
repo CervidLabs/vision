@@ -17,7 +17,8 @@ export interface JPEGReadOptions {
   resize?: {
     width?: number;
     height?: number;
-    method?: 'nearest' | 'bilinear' | 'area';
+    method?: "nearest" | "bilinear" | "area";
+    shrinkOnLoad?: boolean;
   };
 }
 const ZZ = new Uint8Array([
@@ -29,11 +30,191 @@ const ZZ = new Uint8Array([
 const JPEG_IDCT_WORKER_THRESHOLD_BLOCKS = 4096;
 const INV_SQRT2 = 1 / Math.SQRT2;
 const COS8 = new Float64Array(64);
+const COS4 = new Float64Array(32);
 
+for (let u = 0; u < 8; u++) {
+  for (let x = 0; x < 4; x++) {
+    // Sampleamos centros de pares de pixeles del bloque 8×8.
+    // x8 = 2x + 0.5 => cos(((2*x8 + 1)uπ)/16) = cos(((4x + 2)uπ)/16)
+    COS4[u * 4 + x] = Math.cos(((4 * x + 2) * u * Math.PI) / 16);
+  }
+}
 for (let u = 0; u < 8; u++) {
   for (let x = 0; x < 8; x++) {
     COS8[u * 8 + x] = Math.cos(((2 * x + 1) * u * Math.PI) / 16);
   }
+}
+function idct8x8To4x4(
+  coeff: Float64Array,
+  tmp: Float64Array,
+  out: Uint8Array,
+  off: number,
+  stride: number,
+): void {
+  // tmp necesita length 32: 8 filas × 4 columnas.
+  // Row pass: 8 frecuencias horizontales → 4 samples.
+  for (let v = 0; v < 8; v++) {
+    const b = v << 3;
+    const tb = v << 2;
+
+    const c0 = coeff[b] * INV_SQRT2;
+    const c1 = coeff[b + 1];
+    const c2 = coeff[b + 2];
+    const c3 = coeff[b + 3];
+    const c4 = coeff[b + 4];
+    const c5 = coeff[b + 5];
+    const c6 = coeff[b + 6];
+    const c7 = coeff[b + 7];
+
+    tmp[tb] =
+      (c0 +
+        c1 * COS4[4] +
+        c2 * COS4[8] +
+        c3 * COS4[12] +
+        c4 * COS4[16] +
+        c5 * COS4[20] +
+        c6 * COS4[24] +
+        c7 * COS4[28]) *
+      0.5;
+
+    tmp[tb + 1] =
+      (c0 +
+        c1 * COS4[5] +
+        c2 * COS4[9] +
+        c3 * COS4[13] +
+        c4 * COS4[17] +
+        c5 * COS4[21] +
+        c6 * COS4[25] +
+        c7 * COS4[29]) *
+      0.5;
+
+    tmp[tb + 2] =
+      (c0 +
+        c1 * COS4[6] +
+        c2 * COS4[10] +
+        c3 * COS4[14] +
+        c4 * COS4[18] +
+        c5 * COS4[22] +
+        c6 * COS4[26] +
+        c7 * COS4[30]) *
+      0.5;
+
+    tmp[tb + 3] =
+      (c0 +
+        c1 * COS4[7] +
+        c2 * COS4[11] +
+        c3 * COS4[15] +
+        c4 * COS4[19] +
+        c5 * COS4[23] +
+        c6 * COS4[27] +
+        c7 * COS4[31]) *
+      0.5;
+  }
+
+  // Column pass: 8 frecuencias verticales → 4 samples.
+  for (let x = 0; x < 4; x++) {
+    const t0 = tmp[x] * INV_SQRT2;
+    const t1 = tmp[4 + x];
+    const t2 = tmp[8 + x];
+    const t3 = tmp[12 + x];
+    const t4 = tmp[16 + x];
+    const t5 = tmp[20 + x];
+    const t6 = tmp[24 + x];
+    const t7 = tmp[28 + x];
+
+    let v: number;
+
+    v =
+      ((t0 +
+        t1 * COS4[4] +
+        t2 * COS4[8] +
+        t3 * COS4[12] +
+        t4 * COS4[16] +
+        t5 * COS4[20] +
+        t6 * COS4[24] +
+        t7 * COS4[28]) *
+        0.5 +
+        128.5) |
+      0;
+
+    out[off + x] = v < 0 ? 0 : v > 255 ? 255 : v;
+
+    v =
+      ((t0 +
+        t1 * COS4[5] +
+        t2 * COS4[9] +
+        t3 * COS4[13] +
+        t4 * COS4[17] +
+        t5 * COS4[21] +
+        t6 * COS4[25] +
+        t7 * COS4[29]) *
+        0.5 +
+        128.5) |
+      0;
+
+    out[off + stride + x] = v < 0 ? 0 : v > 255 ? 255 : v;
+
+    v =
+      ((t0 +
+        t1 * COS4[6] +
+        t2 * COS4[10] +
+        t3 * COS4[14] +
+        t4 * COS4[18] +
+        t5 * COS4[22] +
+        t6 * COS4[26] +
+        t7 * COS4[30]) *
+        0.5 +
+        128.5) |
+      0;
+
+    out[off + stride * 2 + x] = v < 0 ? 0 : v > 255 ? 255 : v;
+
+    v =
+      ((t0 +
+        t1 * COS4[7] +
+        t2 * COS4[11] +
+        t3 * COS4[15] +
+        t4 * COS4[19] +
+        t5 * COS4[23] +
+        t6 * COS4[27] +
+        t7 * COS4[31]) *
+        0.5 +
+        128.5) |
+      0;
+
+    out[off + stride * 3 + x] = v < 0 ? 0 : v > 255 ? 255 : v;
+  }
+}
+function idctDCOnlyHalf(
+  dc: number,
+  out: Uint8Array,
+  off: number,
+  stride: number,
+): void {
+  const value = Math.round(dc * 0.125 + 128);
+  const v = value < 0 ? 0 : value > 255 ? 255 : value;
+
+  for (let y = 0; y < 4; y++) {
+    const row = off + y * stride;
+
+    out[row] = v;
+    out[row + 1] = v;
+    out[row + 2] = v;
+    out[row + 3] = v;
+  }
+}
+interface ProgressiveCoefficients {
+  width: number;
+  height: number;
+  comps: Comp[];
+  qtables: (Uint8Array | undefined)[];
+  nc: number;
+  hMax: number;
+  vMax: number;
+  nbX: number[];
+  nbY: number[];
+  totalBlocks: number;
+  coeffBufs: Int16Array[];
 }
 function idct8x8(coeff: Float64Array, tmp: Float64Array, out: Uint8Array, off: number, stride: number): void {
   // ── Row pass ─────────────────────────────────────────────
@@ -164,7 +345,7 @@ class BitReader {
   constructor(
     private buf: Uint8Array,
     public pos: number,
-  ) {}
+  ) { }
 
   get restartSeen(): boolean {
     const v = this._rst;
@@ -737,8 +918,9 @@ function decodeBaseline(f: JPEGFile): VisionFrame {
 //   DC refine (Ss=0, Se=0, Ah>0) — read 1 refinement bit per block
 //   AC first  (Ss>0, Ah=0)       — like baseline AC with EOB runs, values << Al
 //   AC refine (Ss>0, Ah>0)       — refine existing nonzeros + place new ones
-
-async function decodeProgressive(f: JPEGFile): Promise<VisionFrame> {
+async function decodeProgressiveCoefficients(
+  f: JPEGFile,
+): Promise<ProgressiveCoefficients> {
   const { width, height, comps, qtables, scans, buf } = f;
   const nc = comps.length;
   const hMax = Math.max(...comps.map((c) => c.hf));
@@ -746,16 +928,17 @@ async function decodeProgressive(f: JPEGFile): Promise<VisionFrame> {
   const mcuCols = Math.ceil(width / (hMax * 8));
   const mcuRows = Math.ceil(height / (vMax * 8));
 
-  // Block grid per component (padded to MCU boundary)
   const nbX = comps.map((c) => mcuCols * c.hf);
   const nbY = comps.map((c) => mcuRows * c.vf);
   const totalBlocks = nbX.reduce((sum, x, i) => sum + x * nbY[i], 0);
 
-  // Coefficient accumulation buffers [ci][blockIdx*64 + zzIdx] = quantised Int16
   const coeffBufs = comps.map((_, ci) => {
     const length = nbX[ci] * nbY[ci] * 64;
-    return new Int16Array(new SharedArrayBuffer(length * Int16Array.BYTES_PER_ELEMENT));
+    return new Int16Array(
+      new SharedArrayBuffer(length * Int16Array.BYTES_PER_ELEMENT),
+    );
   });
+
   for (const scan of scans) {
     const { nComps, scanComps, Ss, Se, Ah, Al, dataStart } = scan;
     const reader = new BitReader(buf, dataStart);
@@ -919,23 +1102,128 @@ async function decodeProgressive(f: JPEGFile): Promise<VisionFrame> {
     }
   }
 
-  // ── Dequantise + IDCT ─────────────────────────────────────────────────────
+  return {
+    width,
+    height,
+    comps,
+    qtables,
+    nc,
+    hMax,
+    vMax,
+    nbX,
+    nbY,
+    totalBlocks,
+    coeffBufs,
+  };
+} function runIdctSyncHalf(
+  coeffBufs: Int16Array[],
+  planes: Uint8Array[],
+  qtables: (Uint8Array | undefined)[],
+  comps: Comp[],
+  nbX: number[],
+  nbY: number[],
+  planeW: number[],
+): void {
+  const dct = new Float64Array(64);
+  const tmp = new Float64Array(32);
+
+  for (let ci = 0; ci < comps.length; ci++) {
+    const qt = qtables[comps[ci].qtId]!;
+    const pw = planeW[ci];
+    const coeffs = coeffBufs[ci];
+
+    for (let row = 0; row < nbY[ci]; row++) {
+      for (let col = 0; col < nbX[ci]; col++) {
+        const bi = row * nbX[ci] + col;
+        const bo = bi * 64;
+        const outOff = row * 4 * pw + col * 4;
+
+        if (isDCOnly(coeffs, bo)) {
+          idctDCOnlyHalf(coeffs[bo] * qt[0], planes[ci], outOff, pw);
+          continue;
+        }
+
+        dct.fill(0);
+
+        for (let k = 0; k < 64; k++) {
+          dct[ZZ[k]] = coeffs[bo + k] * qt[k];
+        }
+
+        idct8x8To4x4(dct, tmp, planes[ci], outOff, pw);
+      }
+    }
+  }
+}
+async function decodeProgressiveHalf(f: JPEGFile): Promise<VisionFrame> {
+  const decoded = await decodeProgressiveCoefficients(f);
+
+  const {
+    width,
+    height,
+    comps,
+    qtables,
+    hMax,
+    vMax,
+    nbX,
+    nbY,
+    coeffBufs,
+  } = decoded;
+
+  const halfW = Math.ceil(width / 2);
+  const halfH = Math.ceil(height / 2);
+
+  const planeW = nbX.map((n) => n * 4);
+  const planeH = nbY.map((n) => n * 4);
+  const planes = comps.map((_, ci) => new Uint8Array(planeW[ci] * planeH[ci]));
+
+  runIdctSyncHalf(coeffBufs, planes, qtables, comps, nbX, nbY, planeW);
+
+  return planesToFrame(
+    planes,
+    planeW,
+    comps,
+    hMax,
+    vMax,
+    halfW,
+    halfH,
+  );
+}
+async function decodeProgressive(f: JPEGFile): Promise<VisionFrame> {
+  const decoded = await decodeProgressiveCoefficients(f);
+
+  const {
+    width,
+    height,
+    comps,
+    qtables,
+    nc,
+    hMax,
+    vMax,
+    nbX,
+    nbY,
+    totalBlocks,
+    coeffBufs,
+  } = decoded;
+
   const planeW = nbX.map((n) => n * 8);
   const planeH = nbY.map((n) => n * 8);
+
   const useWorkers = totalBlocks >= JPEG_IDCT_WORKER_THRESHOLD_BLOCKS;
 
   const planes = comps.map((_, ci) => {
     const size = planeW[ci] * planeH[ci];
 
-    return useWorkers ? new Uint8Array(new SharedArrayBuffer(size)) : new Uint8Array(size);
+    return useWorkers
+      ? new Uint8Array(new SharedArrayBuffer(size))
+      : new Uint8Array(size);
   });
+
   if (!useWorkers) {
     runIdctSync(coeffBufs, planes, qtables, comps, nbX, nbY, planeW);
     return planesToFrame(planes, planeW, comps, hMax, vMax, width, height);
   }
 
   const pool = getJpegIdctWorkerPool();
-
   const jobs: Promise<void>[] = [];
 
   for (let ci = 0; ci < nc; ci++) {
@@ -955,23 +1243,28 @@ async function decodeProgressive(f: JPEGFile): Promise<VisionFrame> {
 
       jobs.push(
         pool.run({
-          coeffBuffer: coeffBufs[ci].buffer,
-          planeBuffer: planes[ci].buffer as SharedArrayBuffer,
+          coeffBuffer: sharedBufferOf(coeffBufs[ci]),
+          planeBuffer: sharedBufferOf(planes[ci]),
           qt,
           nbX: nbX[ci],
           rowStart,
           rowEnd,
           planeWidth: planeW[ci],
-        }),
+        })
       );
     }
   }
+
   await Promise.all(jobs);
 
-  // Do not close the shared IDCT pool here. It is expected to be unref()
-  // or managed by an idle timeout by JpegIdctWorkerPool. Closing it per decode
-  // forces worker recreation in sequential benchmarks and hurts read/decode time.
   return planesToFrame(planes, planeW, comps, hMax, vMax, width, height);
+}
+function sharedBufferOf(view: ArrayBufferView): SharedArrayBuffer {
+  if (!(view.buffer instanceof SharedArrayBuffer)) {
+    throw new Error("Expected SharedArrayBuffer-backed view");
+  }
+
+  return view.buffer;
 }
 function idctDCOnly(dc: number, out: Uint8Array, off: number, stride: number): void {
   const value = Math.round(dc * 0.125 + 128);
@@ -1039,38 +1332,114 @@ function runIdctSync(
 }
 // ── Public read entry point ───────────────────────────────────────────────────
 
-export async function readJPEG(path: string, opts: JPEGReadOptions = {}): Promise<VisionFrame> {
+export async function readJPEG(
+  path: string,
+  opts: JPEGReadOptions = {},
+): Promise<VisionFrame> {
   const raw = await fs.readFile(path);
   const buf = new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
   const jpeg = parseFile(buf);
 
-  const frame = jpeg.sofType <= 1 ? decodeBaseline(jpeg) : await decodeProgressive(jpeg);
+  if (opts.resize?.shrinkOnLoad === true) {
+    const target = resolveJPEGResizeSize(jpeg.width, jpeg.height, opts.resize);
+
+    if (jpeg.sofType === 2 && shouldUseHalfShrink(jpeg, target)) {
+      const half = await decodeProgressiveHalf(jpeg);
+
+      const { resize } = await import('../kernels/geometry.js');
+
+      return resize(
+        half,
+        target.width,
+        target.height,
+        target.method,
+      );
+    }
+  }
+
+  const frame =
+    jpeg.sofType <= 1
+      ? decodeBaseline(jpeg)
+      : await decodeProgressive(jpeg);
 
   if (!opts.resize) {
     return frame;
   }
 
-  const { resize, resolveResizeSize } = await import('../kernels/geometry.js');
+  const { resize } = await import('../kernels/geometry.js');
 
-  const resizeOpts: {
-    width?: number;
-    height?: number;
-    method: 'nearest' | 'bilinear' | 'area';
-  } = {
-    method: opts.resize.method ?? 'bilinear',
+  const target = resolveJPEGResizeSize(
+    frame.width,
+    frame.height,
+    opts.resize,
+  );
+
+  return resize(frame, target.width, target.height, target.method);
+}
+type JPEGResizeMethod = 'nearest' | 'bilinear' | 'area';
+
+interface ResolvedJPEGResize {
+  width: number;
+  height: number;
+  method: JPEGResizeMethod;
+}
+
+function resolveJPEGResizeSize(
+  srcW: number,
+  srcH: number,
+  resize: NonNullable<JPEGReadOptions['resize']>,
+): ResolvedJPEGResize {
+  const method = resize.method ?? 'bilinear';
+
+  if (resize.width !== undefined && resize.height !== undefined) {
+    return {
+      width: Math.max(1, Math.round(resize.width)),
+      height: Math.max(1, Math.round(resize.height)),
+      method,
+    };
+  }
+
+  if (resize.width !== undefined) {
+    const w = Math.max(1, Math.round(resize.width));
+    const h = Math.max(1, Math.round((srcH * w) / srcW));
+
+    return { width: w, height: h, method };
+  }
+
+  if (resize.height !== undefined) {
+    const h = Math.max(1, Math.round(resize.height));
+    const w = Math.max(1, Math.round((srcW * h) / srcH));
+
+    return { width: w, height: h, method };
+  }
+
+  return {
+    width: srcW,
+    height: srcH,
+    method,
   };
+}
 
-  if (opts.resize.width !== undefined) {
-    resizeOpts.width = opts.resize.width;
-  }
+function shouldUseHalfShrink(
+  jpeg: JPEGFile,
+  target: ResolvedJPEGResize,
+): boolean {
+  const halfW = Math.ceil(jpeg.width / 2);
+  const halfH = Math.ceil(jpeg.height / 2);
 
-  if (opts.resize.height !== undefined) {
-    resizeOpts.height = opts.resize.height;
-  }
-
-  const size = resolveResizeSize(frame, resizeOpts);
-
-  return resize(frame, size.width, size.height, size.method);
+  // Solo conviene si el objetivo cabe dentro de la imagen half.
+  // Evita decodificar half y luego upscalear.
+  return target.width <= halfW && target.height <= halfH;
+}
+async function tryReadJPEGHalfResize(
+  jpeg: JPEGFile,
+  opts: JPEGReadOptions,
+): Promise<VisionFrame | null> {
+  // Solo activar luego de implementar IDCT 4x4 real.
+  // Por ahora regresamos null para no romper calidad ni tiempos.
+  void jpeg;
+  void opts;
+  return null;
 }
 // ═════════════════════════════════════════════════════════════════════════════
 //  PROGRESSIVE JPEG ENCODER  (SOF2, spectral selection, Annex-K tables)
@@ -1312,7 +1681,11 @@ function writeSOS(out: OutputBuffer, comps: Array<{ id: number; dcId: number; ac
   out.writeByte((Ah << 4) | Al);
 }
 
-export async function writeJPEG(path: string, frame: VisionFrame, quality = 85): Promise<void> {
+export interface JPEGWriteOptions {
+  progressive?: boolean;
+}
+
+export async function writeJPEG(path: string, frame: VisionFrame, quality = 85, opts: JPEGWriteOptions = {}): Promise<void> {
   if (frame.channels !== 3) {
     throw new Error('writeJPEG: requires 3-channel RGB frame (.toRGB() first)');
   }
@@ -1375,6 +1748,25 @@ export async function writeJPEG(path: string, frame: VisionFrame, quality = 85):
 
   // ── FDCT + quantise — pre-allocated fdctTmp avoids per-block allocation ───
   const qcoeff = [new Int16Array(nBlocks * 64), new Int16Array(nBlocks * 64), new Int16Array(nBlocks * 64)];
+  const progressive = opts.progressive ?? true;
+
+  if (!progressive) {
+    return writeJPEGBaselineFromQcoeff({
+      path,
+      width,
+      height,
+      nBlocks,
+      mcuRows,
+      mcuCols,
+      qcoeff,
+      lumaZZ,
+      chromaZZ,
+      dcLE,
+      dcCE,
+      acLE,
+      acCE,
+    });
+  }
   const planesArr = [yP, cbP, crP];
   const qts = [lumaQ, chromaQ, chromaQ];
   const dct = new Float64Array(64);
@@ -1495,6 +1887,161 @@ export async function writeJPEG(path: string, frame: VisionFrame, quality = 85):
   out.writeByte(0xd9);
 
   // Write directly from Uint8Array — no intermediate number[] conversion
+  const res = out.result;
+  await fs.writeFile(path, Buffer.from(res.buffer, res.byteOffset, res.byteLength));
+}
+
+async function writeJPEGBaselineFromQcoeff(args: {
+  path: string;
+  width: number;
+  height: number;
+  nBlocks: number;
+  mcuRows: number;
+  mcuCols: number;
+  qcoeff: Int16Array[];
+  lumaZZ: Uint8Array;
+  chromaZZ: Uint8Array;
+  dcLE: (HCode | undefined)[];
+  dcCE: (HCode | undefined)[];
+  acLE: (HCode | undefined)[];
+  acCE: (HCode | undefined)[];
+}): Promise<void> {
+  const {
+    path,
+    width,
+    height,
+    nBlocks,
+    mcuRows,
+    mcuCols,
+    qcoeff,
+    lumaZZ,
+    chromaZZ,
+    dcLE,
+    dcCE,
+    acLE,
+    acCE,
+  } = args;
+
+  const out = new OutputBuffer(Math.max(65536, nBlocks * 32));
+
+  // SOI + APP0
+  out.writeBytes([
+    0xff, 0xd8,
+    0xff, 0xe0, 0x00, 0x10,
+    0x4a, 0x46, 0x49, 0x46, 0x00,
+    0x01, 0x01, 0x00,
+    0x00, 0x01, 0x00, 0x01,
+    0x00, 0x00,
+  ]);
+
+  writeDQT(out, 0, lumaZZ);
+  writeDQT(out, 1, chromaZZ);
+
+  // SOF0 baseline, 4:4:4, 3 components
+  out.writeByte(0xff);
+  out.writeByte(0xc0);
+  out.writeU16(17);
+  out.writeBytes([
+    0x08,
+    height >> 8, height & 0xff,
+    width >> 8, width & 0xff,
+    0x03,
+    0x01, 0x11, 0x00,
+    0x02, 0x11, 0x01,
+    0x03, 0x11, 0x01,
+  ]);
+
+  writeDHT(out, 0, 0, DC_L_BITS, DC_L_VALS);
+  writeDHT(out, 1, 0, AC_L_BITS, AC_L_VALS);
+  writeDHT(out, 0, 1, DC_C_BITS, DC_C_VALS);
+  writeDHT(out, 1, 1, AC_C_BITS, AC_C_VALS);
+
+  // One interleaved baseline scan: Y, Cb, Cr, Ss=0 Se=63 Ah=0 Al=0
+  writeSOS(
+    out,
+    [
+      { id: 1, dcId: 0, acId: 0 },
+      { id: 2, dcId: 1, acId: 1 },
+      { id: 3, dcId: 1, acId: 1 },
+    ],
+    0,
+    63,
+    0,
+    0,
+  );
+
+  const w = new BitWriter2(Math.max(4096, nBlocks * 16));
+
+  const dcPrev = [0, 0, 0];
+  const dcEncs = [dcLE, dcCE, dcCE];
+  const acEncs = [acLE, acCE, acCE];
+
+  for (let mr = 0; mr < mcuRows; mr++) {
+    for (let mc = 0; mc < mcuCols; mc++) {
+      const bi = mr * mcuCols + mc;
+
+      for (let ci = 0; ci < 3; ci++) {
+        const qc = qcoeff[ci].subarray(bi * 64, bi * 64 + 64);
+
+        const diff = qc[0] - dcPrev[ci];
+        dcPrev[ci] = qc[0];
+
+        const dcCat = valueCat(diff);
+        const dcH = dcEncs[ci][dcCat]!;
+
+        w.write(dcH.code, dcH.bits);
+
+        if (dcCat > 0) {
+          w.write(encodeVal(diff, dcCat), dcCat);
+        }
+
+        let run = 0;
+        const acEnc = acEncs[ci];
+
+        for (let k = 1; k < 64; k++) {
+          const v = qc[k];
+
+          if (v === 0) {
+            run++;
+
+            if (run === 16) {
+              const zrl = acEnc[0xf0]!;
+              w.write(zrl.code, zrl.bits);
+              run = 0;
+            }
+
+            continue;
+          }
+
+          const acCat = valueCat(v);
+
+          while (run > 15) {
+            const zrl = acEnc[0xf0]!;
+            w.write(zrl.code, zrl.bits);
+            run -= 16;
+          }
+
+          const h = acEnc[(run << 4) | acCat]!;
+          w.write(h.code, h.bits);
+          w.write(encodeVal(v, acCat), acCat);
+
+          run = 0;
+        }
+
+        if (run > 0) {
+          const eob = acEnc[0]!;
+          w.write(eob.code, eob.bits);
+        }
+      }
+    }
+  }
+
+  w.flush();
+  out.appendWriter(w);
+
+  out.writeByte(0xff);
+  out.writeByte(0xd9);
+
   const res = out.result;
   await fs.writeFile(path, Buffer.from(res.buffer, res.byteOffset, res.byteLength));
 }

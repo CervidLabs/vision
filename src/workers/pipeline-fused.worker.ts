@@ -1,6 +1,6 @@
-import { VisionFrame } from './VisionFrame.js';
+import { VisionFrame } from '../core/VisionFrame.js';
 import * as Kernels from '../kernels/index.js';
-import { getPipelineWorkerPool } from './PipelineWorkerPool.js';
+import { getPipelineWorkerPool } from '../core/PipelineWorkerPool.js';
 
 const NUM_PIPELINE_WORKERS = Math.max(1, Math.min(8, 7));
 const FUSED_WORKER_THRESHOLD_PX = 2_000_000;
