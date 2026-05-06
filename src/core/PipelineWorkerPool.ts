@@ -29,7 +29,7 @@ interface WorkerResponse {
 }
 
 function isWorkerResponse(value: unknown): value is WorkerResponse {
-  return typeof value === 'object' && value !== null && 'id' in value && typeof (value as { id: unknown }).id === 'number';
+  return typeof value === 'object' && value !== null && 'id' in value && typeof (value).id === 'number';
 }
 
 interface Pending {
@@ -123,7 +123,7 @@ class PipelineWorkerPool {
     }
   }
 
-  run(job: PipelineWorkerJob): Promise<void> {
+  async run(job: PipelineWorkerJob): Promise<void> {
     if (this.closed) {
       return Promise.reject(new Error('PipelineWorkerPool is closed'));
     }
@@ -227,7 +227,7 @@ class PipelineWorkerPool {
     this.workers.length = 0;
     this.freeList.length = 0;
 
-    await Promise.allSettled(workers.map((worker) => worker.terminate()));
+    await Promise.allSettled(workers.map(async (worker) => worker.terminate()));
 
     if (sharedPool === this) {
       sharedPool = null;
@@ -238,17 +238,11 @@ class PipelineWorkerPool {
 let sharedPool: PipelineWorkerPool | null = null;
 
 export function getPipelineWorkerPool(): PipelineWorkerPool {
-  if (!sharedPool) {
-    sharedPool = new PipelineWorkerPool();
-  }
+  sharedPool ??= new PipelineWorkerPool();
 
   return sharedPool;
 }
 
 export async function closePipelineWorkerPool(): Promise<void> {
-  if (!sharedPool) {
-    return;
-  }
-
-  await sharedPool.close();
+  return sharedPool?.close();
 }

@@ -918,9 +918,9 @@ function decodeBaseline(f: JPEGFile): VisionFrame {
 //   DC refine (Ss=0, Se=0, Ah>0) — read 1 refinement bit per block
 //   AC first  (Ss>0, Ah=0)       — like baseline AC with EOB runs, values << Al
 //   AC refine (Ss>0, Ah>0)       — refine existing nonzeros + place new ones
-async function decodeProgressiveCoefficients(
+function decodeProgressiveCoefficients(
   f: JPEGFile,
-): Promise<ProgressiveCoefficients> {
+): ProgressiveCoefficients {
   const { width, height, comps, qtables, scans, buf } = f;
   const nc = comps.length;
   const hMax = Math.max(...comps.map((c) => c.hf));
@@ -1154,8 +1154,8 @@ async function decodeProgressiveCoefficients(
     }
   }
 }
-async function decodeProgressiveHalf(f: JPEGFile): Promise<VisionFrame> {
-  const decoded = await decodeProgressiveCoefficients(f);
+function decodeProgressiveHalf(f: JPEGFile): VisionFrame {
+  const decoded = decodeProgressiveCoefficients(f);
 
   const {
     width,
@@ -1189,7 +1189,7 @@ async function decodeProgressiveHalf(f: JPEGFile): Promise<VisionFrame> {
   );
 }
 async function decodeProgressive(f: JPEGFile): Promise<VisionFrame> {
-  const decoded = await decodeProgressiveCoefficients(f);
+  const decoded = decodeProgressiveCoefficients(f);
 
   const {
     width,
@@ -1344,7 +1344,7 @@ export async function readJPEG(
     const target = resolveJPEGResizeSize(jpeg.width, jpeg.height, opts.resize);
 
     if (jpeg.sofType === 2 && shouldUseHalfShrink(jpeg, target)) {
-      const half = await decodeProgressiveHalf(jpeg);
+      const half = decodeProgressiveHalf(jpeg);
 
       const { resize } = await import('../kernels/geometry.js');
 
@@ -1430,16 +1430,6 @@ function shouldUseHalfShrink(
   // Solo conviene si el objetivo cabe dentro de la imagen half.
   // Evita decodificar half y luego upscalear.
   return target.width <= halfW && target.height <= halfH;
-}
-async function tryReadJPEGHalfResize(
-  jpeg: JPEGFile,
-  opts: JPEGReadOptions,
-): Promise<VisionFrame | null> {
-  // Solo activar luego de implementar IDCT 4x4 real.
-  // Por ahora regresamos null para no romper calidad ni tiempos.
-  void jpeg;
-  void opts;
-  return null;
 }
 // ═════════════════════════════════════════════════════════════════════════════
 //  PROGRESSIVE JPEG ENCODER  (SOF2, spectral selection, Annex-K tables)
