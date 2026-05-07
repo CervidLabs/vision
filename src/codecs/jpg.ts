@@ -17,7 +17,7 @@ export interface JPEGReadOptions {
   resize?: {
     width?: number;
     height?: number;
-    method?: "nearest" | "bilinear" | "area";
+    method?: 'nearest' | 'bilinear' | 'area';
     shrinkOnLoad?: boolean;
   };
 }
@@ -44,13 +44,7 @@ for (let u = 0; u < 8; u++) {
     COS8[u * 8 + x] = Math.cos(((2 * x + 1) * u * Math.PI) / 16);
   }
 }
-function idct8x8To4x4(
-  coeff: Float64Array,
-  tmp: Float64Array,
-  out: Uint8Array,
-  off: number,
-  stride: number,
-): void {
+function idct8x8To4x4(coeff: Float64Array, tmp: Float64Array, out: Uint8Array, off: number, stride: number): void {
   // tmp necesita length 32: 8 filas × 4 columnas.
   // Row pass: 8 frecuencias horizontales → 4 samples.
   for (let v = 0; v < 8; v++) {
@@ -66,49 +60,13 @@ function idct8x8To4x4(
     const c6 = coeff[b + 6];
     const c7 = coeff[b + 7];
 
-    tmp[tb] =
-      (c0 +
-        c1 * COS4[4] +
-        c2 * COS4[8] +
-        c3 * COS4[12] +
-        c4 * COS4[16] +
-        c5 * COS4[20] +
-        c6 * COS4[24] +
-        c7 * COS4[28]) *
-      0.5;
+    tmp[tb] = (c0 + c1 * COS4[4] + c2 * COS4[8] + c3 * COS4[12] + c4 * COS4[16] + c5 * COS4[20] + c6 * COS4[24] + c7 * COS4[28]) * 0.5;
 
-    tmp[tb + 1] =
-      (c0 +
-        c1 * COS4[5] +
-        c2 * COS4[9] +
-        c3 * COS4[13] +
-        c4 * COS4[17] +
-        c5 * COS4[21] +
-        c6 * COS4[25] +
-        c7 * COS4[29]) *
-      0.5;
+    tmp[tb + 1] = (c0 + c1 * COS4[5] + c2 * COS4[9] + c3 * COS4[13] + c4 * COS4[17] + c5 * COS4[21] + c6 * COS4[25] + c7 * COS4[29]) * 0.5;
 
-    tmp[tb + 2] =
-      (c0 +
-        c1 * COS4[6] +
-        c2 * COS4[10] +
-        c3 * COS4[14] +
-        c4 * COS4[18] +
-        c5 * COS4[22] +
-        c6 * COS4[26] +
-        c7 * COS4[30]) *
-      0.5;
+    tmp[tb + 2] = (c0 + c1 * COS4[6] + c2 * COS4[10] + c3 * COS4[14] + c4 * COS4[18] + c5 * COS4[22] + c6 * COS4[26] + c7 * COS4[30]) * 0.5;
 
-    tmp[tb + 3] =
-      (c0 +
-        c1 * COS4[7] +
-        c2 * COS4[11] +
-        c3 * COS4[15] +
-        c4 * COS4[19] +
-        c5 * COS4[23] +
-        c6 * COS4[27] +
-        c7 * COS4[31]) *
-      0.5;
+    tmp[tb + 3] = (c0 + c1 * COS4[7] + c2 * COS4[11] + c3 * COS4[15] + c4 * COS4[19] + c5 * COS4[23] + c6 * COS4[27] + c7 * COS4[31]) * 0.5;
   }
 
   // Column pass: 8 frecuencias verticales → 4 samples.
@@ -124,73 +82,24 @@ function idct8x8To4x4(
 
     let v: number;
 
-    v =
-      ((t0 +
-        t1 * COS4[4] +
-        t2 * COS4[8] +
-        t3 * COS4[12] +
-        t4 * COS4[16] +
-        t5 * COS4[20] +
-        t6 * COS4[24] +
-        t7 * COS4[28]) *
-        0.5 +
-        128.5) |
-      0;
+    v = ((t0 + t1 * COS4[4] + t2 * COS4[8] + t3 * COS4[12] + t4 * COS4[16] + t5 * COS4[20] + t6 * COS4[24] + t7 * COS4[28]) * 0.5 + 128.5) | 0;
 
     out[off + x] = v < 0 ? 0 : v > 255 ? 255 : v;
 
-    v =
-      ((t0 +
-        t1 * COS4[5] +
-        t2 * COS4[9] +
-        t3 * COS4[13] +
-        t4 * COS4[17] +
-        t5 * COS4[21] +
-        t6 * COS4[25] +
-        t7 * COS4[29]) *
-        0.5 +
-        128.5) |
-      0;
+    v = ((t0 + t1 * COS4[5] + t2 * COS4[9] + t3 * COS4[13] + t4 * COS4[17] + t5 * COS4[21] + t6 * COS4[25] + t7 * COS4[29]) * 0.5 + 128.5) | 0;
 
     out[off + stride + x] = v < 0 ? 0 : v > 255 ? 255 : v;
 
-    v =
-      ((t0 +
-        t1 * COS4[6] +
-        t2 * COS4[10] +
-        t3 * COS4[14] +
-        t4 * COS4[18] +
-        t5 * COS4[22] +
-        t6 * COS4[26] +
-        t7 * COS4[30]) *
-        0.5 +
-        128.5) |
-      0;
+    v = ((t0 + t1 * COS4[6] + t2 * COS4[10] + t3 * COS4[14] + t4 * COS4[18] + t5 * COS4[22] + t6 * COS4[26] + t7 * COS4[30]) * 0.5 + 128.5) | 0;
 
     out[off + stride * 2 + x] = v < 0 ? 0 : v > 255 ? 255 : v;
 
-    v =
-      ((t0 +
-        t1 * COS4[7] +
-        t2 * COS4[11] +
-        t3 * COS4[15] +
-        t4 * COS4[19] +
-        t5 * COS4[23] +
-        t6 * COS4[27] +
-        t7 * COS4[31]) *
-        0.5 +
-        128.5) |
-      0;
+    v = ((t0 + t1 * COS4[7] + t2 * COS4[11] + t3 * COS4[15] + t4 * COS4[19] + t5 * COS4[23] + t6 * COS4[27] + t7 * COS4[31]) * 0.5 + 128.5) | 0;
 
     out[off + stride * 3 + x] = v < 0 ? 0 : v > 255 ? 255 : v;
   }
 }
-function idctDCOnlyHalf(
-  dc: number,
-  out: Uint8Array,
-  off: number,
-  stride: number,
-): void {
+function idctDCOnlyHalf(dc: number, out: Uint8Array, off: number, stride: number): void {
   const value = Math.round(dc * 0.125 + 128);
   const v = value < 0 ? 0 : value > 255 ? 255 : value;
 
@@ -345,7 +254,7 @@ class BitReader {
   constructor(
     private buf: Uint8Array,
     public pos: number,
-  ) { }
+  ) {}
 
   get restartSeen(): boolean {
     const v = this._rst;
@@ -918,9 +827,7 @@ function decodeBaseline(f: JPEGFile): VisionFrame {
 //   DC refine (Ss=0, Se=0, Ah>0) — read 1 refinement bit per block
 //   AC first  (Ss>0, Ah=0)       — like baseline AC with EOB runs, values << Al
 //   AC refine (Ss>0, Ah>0)       — refine existing nonzeros + place new ones
-function decodeProgressiveCoefficients(
-  f: JPEGFile,
-): ProgressiveCoefficients {
+function decodeProgressiveCoefficients(f: JPEGFile): ProgressiveCoefficients {
   const { width, height, comps, qtables, scans, buf } = f;
   const nc = comps.length;
   const hMax = Math.max(...comps.map((c) => c.hf));
@@ -934,9 +841,7 @@ function decodeProgressiveCoefficients(
 
   const coeffBufs = comps.map((_, ci) => {
     const length = nbX[ci] * nbY[ci] * 64;
-    return new Int16Array(
-      new SharedArrayBuffer(length * Int16Array.BYTES_PER_ELEMENT),
-    );
+    return new Int16Array(new SharedArrayBuffer(length * Int16Array.BYTES_PER_ELEMENT));
   });
 
   for (const scan of scans) {
@@ -1115,7 +1020,8 @@ function decodeProgressiveCoefficients(
     totalBlocks,
     coeffBufs,
   };
-} function runIdctSyncHalf(
+}
+function runIdctSyncHalf(
   coeffBufs: Int16Array[],
   planes: Uint8Array[],
   qtables: (Uint8Array | undefined)[],
@@ -1157,17 +1063,7 @@ function decodeProgressiveCoefficients(
 function decodeProgressiveHalf(f: JPEGFile): VisionFrame {
   const decoded = decodeProgressiveCoefficients(f);
 
-  const {
-    width,
-    height,
-    comps,
-    qtables,
-    hMax,
-    vMax,
-    nbX,
-    nbY,
-    coeffBufs,
-  } = decoded;
+  const { width, height, comps, qtables, hMax, vMax, nbX, nbY, coeffBufs } = decoded;
 
   const halfW = Math.ceil(width / 2);
   const halfH = Math.ceil(height / 2);
@@ -1178,32 +1074,12 @@ function decodeProgressiveHalf(f: JPEGFile): VisionFrame {
 
   runIdctSyncHalf(coeffBufs, planes, qtables, comps, nbX, nbY, planeW);
 
-  return planesToFrame(
-    planes,
-    planeW,
-    comps,
-    hMax,
-    vMax,
-    halfW,
-    halfH,
-  );
+  return planesToFrame(planes, planeW, comps, hMax, vMax, halfW, halfH);
 }
 async function decodeProgressive(f: JPEGFile): Promise<VisionFrame> {
   const decoded = decodeProgressiveCoefficients(f);
 
-  const {
-    width,
-    height,
-    comps,
-    qtables,
-    nc,
-    hMax,
-    vMax,
-    nbX,
-    nbY,
-    totalBlocks,
-    coeffBufs,
-  } = decoded;
+  const { width, height, comps, qtables, nc, hMax, vMax, nbX, nbY, totalBlocks, coeffBufs } = decoded;
 
   const planeW = nbX.map((n) => n * 8);
   const planeH = nbY.map((n) => n * 8);
@@ -1213,9 +1089,7 @@ async function decodeProgressive(f: JPEGFile): Promise<VisionFrame> {
   const planes = comps.map((_, ci) => {
     const size = planeW[ci] * planeH[ci];
 
-    return useWorkers
-      ? new Uint8Array(new SharedArrayBuffer(size))
-      : new Uint8Array(size);
+    return useWorkers ? new Uint8Array(new SharedArrayBuffer(size)) : new Uint8Array(size);
   });
 
   if (!useWorkers) {
@@ -1250,7 +1124,7 @@ async function decodeProgressive(f: JPEGFile): Promise<VisionFrame> {
           rowStart,
           rowEnd,
           planeWidth: planeW[ci],
-        })
+        }),
       );
     }
   }
@@ -1261,7 +1135,7 @@ async function decodeProgressive(f: JPEGFile): Promise<VisionFrame> {
 }
 function sharedBufferOf(view: ArrayBufferView): SharedArrayBuffer {
   if (!(view.buffer instanceof SharedArrayBuffer)) {
-    throw new Error("Expected SharedArrayBuffer-backed view");
+    throw new Error('Expected SharedArrayBuffer-backed view');
   }
 
   return view.buffer;
@@ -1332,10 +1206,7 @@ function runIdctSync(
 }
 // ── Public read entry point ───────────────────────────────────────────────────
 
-export async function readJPEG(
-  path: string,
-  opts: JPEGReadOptions = {},
-): Promise<VisionFrame> {
+export async function readJPEG(path: string, opts: JPEGReadOptions = {}): Promise<VisionFrame> {
   const raw = await fs.readFile(path);
   const buf = new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
   const jpeg = parseFile(buf);
@@ -1348,19 +1219,11 @@ export async function readJPEG(
 
       const { resize } = await import('../kernels/geometry.js');
 
-      return resize(
-        half,
-        target.width,
-        target.height,
-        target.method,
-      );
+      return resize(half, target.width, target.height, target.method);
     }
   }
 
-  const frame =
-    jpeg.sofType <= 1
-      ? decodeBaseline(jpeg)
-      : await decodeProgressive(jpeg);
+  const frame = jpeg.sofType <= 1 ? decodeBaseline(jpeg) : await decodeProgressive(jpeg);
 
   if (!opts.resize) {
     return frame;
@@ -1368,11 +1231,7 @@ export async function readJPEG(
 
   const { resize } = await import('../kernels/geometry.js');
 
-  const target = resolveJPEGResizeSize(
-    frame.width,
-    frame.height,
-    opts.resize,
-  );
+  const target = resolveJPEGResizeSize(frame.width, frame.height, opts.resize);
 
   return resize(frame, target.width, target.height, target.method);
 }
@@ -1384,11 +1243,7 @@ interface ResolvedJPEGResize {
   method: JPEGResizeMethod;
 }
 
-function resolveJPEGResizeSize(
-  srcW: number,
-  srcH: number,
-  resize: NonNullable<JPEGReadOptions['resize']>,
-): ResolvedJPEGResize {
+function resolveJPEGResizeSize(srcW: number, srcH: number, resize: NonNullable<JPEGReadOptions['resize']>): ResolvedJPEGResize {
   const method = resize.method ?? 'bilinear';
 
   if (resize.width !== undefined && resize.height !== undefined) {
@@ -1420,10 +1275,7 @@ function resolveJPEGResizeSize(
   };
 }
 
-function shouldUseHalfShrink(
-  jpeg: JPEGFile,
-  target: ResolvedJPEGResize,
-): boolean {
+function shouldUseHalfShrink(jpeg: JPEGFile, target: ResolvedJPEGResize): boolean {
   const halfW = Math.ceil(jpeg.width / 2);
   const halfH = Math.ceil(jpeg.height / 2);
 
@@ -1896,33 +1748,12 @@ async function writeJPEGBaselineFromQcoeff(args: {
   acLE: (HCode | undefined)[];
   acCE: (HCode | undefined)[];
 }): Promise<void> {
-  const {
-    path,
-    width,
-    height,
-    nBlocks,
-    mcuRows,
-    mcuCols,
-    qcoeff,
-    lumaZZ,
-    chromaZZ,
-    dcLE,
-    dcCE,
-    acLE,
-    acCE,
-  } = args;
+  const { path, width, height, nBlocks, mcuRows, mcuCols, qcoeff, lumaZZ, chromaZZ, dcLE, dcCE, acLE, acCE } = args;
 
   const out = new OutputBuffer(Math.max(65536, nBlocks * 32));
 
   // SOI + APP0
-  out.writeBytes([
-    0xff, 0xd8,
-    0xff, 0xe0, 0x00, 0x10,
-    0x4a, 0x46, 0x49, 0x46, 0x00,
-    0x01, 0x01, 0x00,
-    0x00, 0x01, 0x00, 0x01,
-    0x00, 0x00,
-  ]);
+  out.writeBytes([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00]);
 
   writeDQT(out, 0, lumaZZ);
   writeDQT(out, 1, chromaZZ);
@@ -1931,15 +1762,7 @@ async function writeJPEGBaselineFromQcoeff(args: {
   out.writeByte(0xff);
   out.writeByte(0xc0);
   out.writeU16(17);
-  out.writeBytes([
-    0x08,
-    height >> 8, height & 0xff,
-    width >> 8, width & 0xff,
-    0x03,
-    0x01, 0x11, 0x00,
-    0x02, 0x11, 0x01,
-    0x03, 0x11, 0x01,
-  ]);
+  out.writeBytes([0x08, height >> 8, height & 0xff, width >> 8, width & 0xff, 0x03, 0x01, 0x11, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01]);
 
   writeDHT(out, 0, 0, DC_L_BITS, DC_L_VALS);
   writeDHT(out, 1, 0, AC_L_BITS, AC_L_VALS);

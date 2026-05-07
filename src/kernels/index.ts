@@ -6,5 +6,6 @@ export * from './parallel.js';
 export * from './draw.js';
 export * from './morphology.js';
 export * from './components.js';
-export * from './masks.js';
 export * from './integral.js';
+export * from './canny.js';
+export * from './transform.js';

@@ -257,13 +257,10 @@ export function resize(frame: VisionFrame, newW: number, newH: number, method: R
   switch (method) {
     case 'nearest':
       return resizeNearest(frame, newW, newH);
-
     case 'bilinear':
       return resizeBilinear(frame, newW, newH);
-
     case 'area':
       return resizeArea(frame, newW, newH);
-
     default:
       throw new Error(`Unknown resize method: ${method as string}`);
   }
@@ -304,6 +301,7 @@ export function flipV(frame: VisionFrame): VisionFrame {
   return out;
 }
 
+/** Rotate 90° clockwise. Output dimensions are swapped (width↔height). */
 export function rotate90(frame: VisionFrame): VisionFrame {
   const { width, height, channels } = frame;
   const out = new VisionFrame(height, width, channels);
@@ -315,6 +313,46 @@ export function rotate90(frame: VisionFrame): VisionFrame {
       const srcOff = (y * width + x) * channels;
       const dstOff = (x * height + (height - 1 - y)) * channels;
 
+      for (let c = 0; c < channels; c++) {
+        dst[dstOff + c] = src[srcOff + c];
+      }
+    }
+  }
+
+  return out;
+}
+
+/** Rotate 180°. Output dimensions are the same. */
+export function rotate180(frame: VisionFrame): VisionFrame {
+  const { width, height, channels } = frame;
+  const out = new VisionFrame(width, height, channels);
+  const src = frame.data;
+  const dst = out.data;
+
+  // Reverse pixel order (works for all channel counts)
+  for (let i = 0; i < width * height; i++) {
+    const srcOff = i * channels;
+    const dstOff = (width * height - 1 - i) * channels;
+    for (let c = 0; c < channels; c++) {
+      dst[dstOff + c] = src[srcOff + c];
+    }
+  }
+
+  return out;
+}
+
+/** Rotate 270° clockwise (= 90° counter-clockwise). Output dimensions are swapped (width↔height). */
+export function rotate270(frame: VisionFrame): VisionFrame {
+  const { width, height, channels } = frame;
+  const out = new VisionFrame(height, width, channels);
+  const src = frame.data;
+  const dst = out.data;
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const srcOff = (y * width + x) * channels;
+      // 270° CW: dst(y, width-1-x) = src(x, y)  — output is (height×width)
+      const dstOff = ((width - 1 - x) * height + y) * channels;
       for (let c = 0; c < channels; c++) {
         dst[dstOff + c] = src[srcOff + c];
       }

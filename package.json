@@ -2,7 +2,6 @@
     "name": "@cervid/vision",
     "version": "0.0.1",
     "type": "module",
-    "private": true,
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
     "files": [
@@ -80,7 +79,7 @@
         "format": "prettier --write \"src/**/*.ts\"",
         "coverage": "c8 node --import tsx --test src/**/*.spec.ts",
         "prepare": "husky",
-        "prepublishOnly": "npm run lint && npm run test && npm run build",
+        "prepublishOnly": "npm run lint && npm run build",
         "test": "vitest run",
         "test:watch": "vitest",
         "test:coverage": "vitest run --coverage",

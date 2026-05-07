@@ -29,7 +29,7 @@ interface WorkerResponse {
 }
 
 function isWorkerResponse(value: unknown): value is WorkerResponse {
-  return typeof value === 'object' && value !== null && 'id' in value && typeof (value).id === 'number';
+  return typeof value === 'object' && value !== null && 'id' in value && typeof value.id === 'number';
 }
 
 interface Pending {
