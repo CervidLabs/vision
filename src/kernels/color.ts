@@ -93,7 +93,7 @@ export function equalizeHistogram(frame: VisionFrame): VisionFrame {
     cdf[i] = running;
   }
 
-  const cdfMin = cdf.find((v) => v > 0) ?? 0;
+  const cdfMin = cdf.find((v) => v > 0)!;
   const lut = new Uint8Array(256);
   for (let i = 0; i < 256; i++) {
     lut[i] = clampU8(Math.round(((cdf[i] - cdfMin) / (n - cdfMin)) * 255));

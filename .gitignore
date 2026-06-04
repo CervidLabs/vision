@@ -6,3 +6,4 @@ dist
 *.jpeg
 *.webp
 *.ppm
+coverage

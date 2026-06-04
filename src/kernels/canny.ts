@@ -95,7 +95,7 @@ function nonMaxSuppression(mag: Float32Array, dir: Uint8Array, width: number, he
 
 // ── Double threshold + hysteresis ─────────────────────────────────────────────
 
-function hysteresis(nms: Float32Array, width: number, height: number, low: number, high: number): Uint8Array {
+export function hysteresis(nms: Float32Array, width: number, height: number, low: number, high: number): Uint8Array {
   const out = new Uint8Array(width * height);
   const STRONG = 255;
   const WEAK = 128;
